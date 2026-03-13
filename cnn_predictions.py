@@ -17,25 +17,47 @@ date_cols = [c for c in df.columns if c not in meta_cols]
 SEQ_LEN = 12
 X, y = [], []
 
-scaler = MinMaxScaler()
-scaled_prices = pd.DataFrame(
-    scaler.fit_transform(df[date_cols].T).T,
-    columns=date_cols
-)
+TRAIN_RATIO = 0.8
+X_train, y_train, X_test, y_test = [], [], [], []
 
-for idx, row in scaled_prices.iterrows():
-    prices = row.values.astype(float)
-    for i in range(SEQ_LEN, len(prices)):
-        seq = prices[i - SEQ_LEN:i]
-        rolling_avg = np.mean(prices[i - 6:i])
-        label = 1 if prices[i] < rolling_avg else 0
-        X.append(seq)
-        y.append(label)
+for _, row in df.iterrows():
+    prices = row[date_cols].values.astype(float)
+    prices = prices[~np.isnan(prices)]
 
-X = np.array(X).reshape(-1, SEQ_LEN, 1)
-y = np.array(y)
+    if len(prices) < SEQ_LEN + 6:
+        continue
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    split = int(len(prices) * TRAIN_RATIO)
+
+    train_prices = prices[:split]
+    test_prices = prices[split:]
+
+    scaler = MinMaxScaler()
+    train_scaled = scaler.fit_transform(train_prices.reshape(-1,1)).flatten()
+    test_scaled = scaler.transform(test_prices.reshape(-1,1)).flatten()
+
+    # TRAIN sequences
+    for i in range(SEQ_LEN, len(train_scaled)):
+        seq = train_scaled[i-SEQ_LEN:i]
+        rolling_avg = np.mean(train_scaled[i-6:i])
+        label = 1 if train_scaled[i] < rolling_avg else 0
+        X_train.append(seq)
+        y_train.append(label)
+
+    # TEST sequences (use last train window for continuity)
+    combined = np.concatenate([train_scaled[-SEQ_LEN:], test_scaled])
+
+    for i in range(SEQ_LEN, len(combined)):
+        seq = combined[i-SEQ_LEN:i]
+        rolling_avg = np.mean(combined[i-6:i])
+        label = 1 if combined[i] < rolling_avg else 0
+        X_test.append(seq)
+        y_test.append(label)
+
+X_train = np.array(X_train).reshape(-1, SEQ_LEN, 1)
+X_test = np.array(X_test).reshape(-1, SEQ_LEN, 1)
+y_train = np.array(y_train)
+y_test = np.array(y_test)
 
 inpx = Input(shape=(SEQ_LEN, 1))
 conv_layer = Conv1D(filters=1, kernel_size=3, strides=1, activation=None, padding='valid')(inpx)
@@ -58,11 +80,22 @@ print(f"Test Accuracy: {acc:.4f}")
 def predict_zip(zip_code):
     match = df[df['ZipCode'] == str(zip_code).strip()]
     if match.empty:
-        print(f"Zip code {zip_code} not found. Available: {sorted(df['ZipCode'].unique())}")
+        print(f"Zip code {zip_code} not found.")
         return
 
-    prices = scaled_prices.loc[match.index[0]].values.astype(float)
-    seq = prices[~np.isnan(prices)][-SEQ_LEN:].reshape(1, SEQ_LEN, 1)
+    prices = match.iloc[0][date_cols].values.astype(float)
+    prices = prices[~np.isnan(prices)]
+
+    if len(prices) < SEQ_LEN:
+        print("Not enough data for prediction.")
+        return
+
+    # IMPORTANT: fit scaler on historical prices ONLY for this ZIP
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(prices.reshape(-1,1)).flatten()
+
+    seq = scaled[-SEQ_LEN:].reshape(1, SEQ_LEN, 1)
+
     prob = model.predict(seq, verbose=0)[0][0]
 
     print(f"Zip Code: {zip_code}")
@@ -72,6 +105,6 @@ def predict_zip(zip_code):
     elif prob <= 0.4:
         print("Bad time to rent")
     else:
-        print("No signal")
+        print("No clear signal")
 
-predict_zip(input("Enter a Boston-area zip code: "))
+predict_zip('02115')

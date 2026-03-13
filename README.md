@@ -1,7 +1,13 @@
 # ML + DM 2 Final Project: Krithika Natarajan and Maya Prasad
 
 ## Problem Statement
-Renters in the Greater Boston area face significant challenges in understanding when and where to rent. The Boston rental market is highly fragmented as pricing dynamics in university-adjacent neighborhoods like Allston differ drastically from downtown or suburban areas, and these local trends are not captured by national tools like Zillow's market metrics. This project aims to build a set of models that help renters make more informed decisions by predicting future rental prices and classifying whether a given zip code represents a good renting opportunity at a given point in time.
+Renters in the Greater Boston area face significant challenges in understanding when and where to rent. The Boston rental market is highly fragmented as pricing dynamics in university-adjacent neighborhoods like Allston differ drastically from downtown or suburban areas, and these local trends are not captured by national tools like Zillow's market metrics.
+
+To address this, we aim to use machine learning to deliver two linked outputs to Boston renters: a prediction of expected rental price given a property's characteristics and location, and a timing signal indicating whether current market conditions represent a favorable moment to rent. These two goals are deliberately connected while understanding how much rental units will cost is important, it is also useful to know when to act on that information is what renters in Boston's highly seasonal market actually need. 
+
+ML is particularly suited for this problem because Boston's rental market is shaped by dense signals like university schedules which influence move in/out, weather patterns which influence utility rates, neighborhood demographics, and historical demand indices. Second, the submarket fragmentation between university-adjacent zip codes and downtown cores means that a single national model will systematically misrepresent local conditions, motivating a Boston-specific modeling approach. Third, the temporal dimension of the timing signal requires a model architecture that can incorporate sequential and seasonal inputs alongside static property features.
+
+ This project aims to build a set of models that help renters make more informed decisions by predicting future rental prices and classifying whether a given zip code represents a good renting opportunity at a given point in time.
 
 
 ## Data

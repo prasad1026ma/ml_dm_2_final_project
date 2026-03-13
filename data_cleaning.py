@@ -3,6 +3,7 @@ import pandas as pd
 def clean_zori_data():
     df = pd.read_csv('ZORI_monthly_by_ZIP.csv')
     df.rename(columns={'RegionName': 'ZipCode'}, inplace=True)
+    df['ZipCode'] = df['ZipCode'].astype(str).str.zfill(5)  
     boston_df = df[df['Metro'].str.contains('Boston', case=False, na=False)].copy()
     boston_df.drop_duplicates(inplace=True)
 
