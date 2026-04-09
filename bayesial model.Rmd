@@ -73,142 +73,231 @@ One-way ANOVA tests whether the variation in ZORF between zip codes is large eno
 With a result of (F=146.7, p<2e-16) means the zip code differences are overwhelmingly real and not due to chance, justifying the use of zip-level random effects in the model.
 
 
+### Introducing Seasonality
+
+```{r}
+long_df <- long_df %>% arrange(date)
+```
+
+```{r}
+
+# Recompute seasonality after sorting just to be safe
+month_num <- as.numeric(format(long_df$date, "%m"))
+long_df$sin_season <- sin(2 * pi * month_num / 12)
+long_df$cos_season <- cos(2 * pi * month_num / 12)
+```
+
+
 ## Building the model
 
 ```{r}
+# Train/test split
 split_idx <- floor(nrow(long_df) * 0.8)
-train_df <- long_df %>% slice(1:split_idx)
-test_df  <- long_df %>% slice((split_idx + 1):nrow(long_df))
-
+train_df  <- long_df %>% slice(1:split_idx)
+test_df   <- long_df %>% slice((split_idx + 1):nrow(long_df))
 cat('nrow train_df:', nrow(train_df), '\n')
-cat('nrow test_df:', nrow(test_df), '\n')
+cat('nrow test_df:',  nrow(test_df),  '\n')
 ```
 
 
 ### Zip-level Random Effects
 ```{r}
-grand_mean   <- mean(long_df$zorf)
-sd_threshold <- sd(long_df$zorf)
-
-zip_means <- long_df %>%
+zip_means <- train_df %>%
   group_by(ZipCode) %>%
-  summarise(zip_mean = mean(zorf)) %>%
-  mutate(
-    deviation = zip_mean - grand_mean,
-    tier      = case_when(
-      deviation >  sd_threshold ~ 'high',
-      deviation < -sd_threshold ~ 'low',
-      TRUE                      ~ 'mid'
-    )
+  summarise(
+    zip_mean = mean(zorf),
+    n_obs    = n()  # keep track of how many observations
+                    # each zip code contributed — useful for
+                    # diagnosing which zip codes are sparse
   )
-```
-Zip codes were grouped into three tiers, high, mid, and low, based on whether their mean ZORF deviated from the grand mean by more than one standard deviation. This threshold was chosen because it reflects a statistically meaningful departure from typical Boston rent levels, and the resulting tiers align naturally with known neighborhood-specific market dynamics.
 
-Adding those features back to our dataset
+cat('Zip code observation counts:\n')
+print(summary(zip_means$n_obs))
+```
+
+
 ```{r}
-# Step 1: join tier into train and test via ZipCode
-train_df <- train_df %>%
-  left_join(zip_means %>% dplyr::select(ZipCode, tier), by = 'ZipCode')
-test_df <- test_df %>%
-  left_join(zip_means %>% dplyr::select(ZipCode, tier), by = 'ZipCode')
+overall_mean <- mean(train_df$zorf)
 
-# Compute tier_means from long_df (not train_df)
-tier_means <- long_df %>%
-  left_join(zip_means %>% dplyr::select(ZipCode, tier), by = 'ZipCode') %>%
-  group_by(tier) %>%
-  summarise(tier_mean = mean(zorf))
-
-# Step 2: join tier_mean via tier
+# Join zip means into training data
 train_df <- train_df %>%
-  left_join(tier_means, by = 'tier')
+  left_join(zip_means %>% dplyr::select(ZipCode, zip_mean), 
+            by = 'ZipCode')
+
+# Join zip means into test data
+# Any zip code in test that wasn't seen in training
+# gets the overall training mean as its baseline.
+# This is conservative — we're saying we have no
+# neighborhood-specific information for this zip code
+# so we assume it behaves like an average neighborhood.
 test_df <- test_df %>%
-  left_join(tier_means, by = 'tier')
+  left_join(zip_means %>% dplyr::select(ZipCode, zip_mean), 
+            by = 'ZipCode') %>%
+  mutate(zip_mean = ifelse(is.na(zip_mean), overall_mean, zip_mean))
+
+# Check how many test zip codes needed the fallback
+n_fallback <- sum(is.na(test_df$zip_mean) | 
+                  test_df$zip_mean == overall_mean)
+cat('Test observations using fallback mean:', n_fallback, '\n')
 ```
+
 
 ### Training the Model
 ```{r}
-### Training the Model
-FEATURES  <- c('tier_mean')
-# FEATURES <- c(FEATURES, 'is_before_september', 'zordi', 'avg_temp')
+# Build y and X for training
+# Subtract zip-level mean from y.
+# The model now learns seasonal patterns and 
+# residual variance on top of the neighborhood baseline,
+# rather than having to explain both at once.
+# The intercept in X should be close to zero on average
+# since the zip means have already absorbed most of
+# the level differences across neighborhoods.
+y <- train_df$zorf - train_df$zip_mean
 
-n_samples <- 10000
-
-# Center y by tier mean — model learns deviations from tier baseline
-y <- train_df$zorf - train_df$tier_mean
-X <- cbind(1, as.matrix(train_df %>% dplyr::select(all_of(FEATURES))))
+X <- cbind(
+  intercept  = 1,
+  sin_season = train_df$sin_season,
+  cos_season = train_df$cos_season
+)
 
 n <- nrow(X)
 p <- ncol(X)
 
-w_hat        <- solve(t(X) %*% X) %*% t(X) %*% y
-df_resid     <- n - p
-scale_resid  <- (t(y - X %*% w_hat) %*% (y - X %*% w_hat) / df_resid)[1, 1]
-chi_draws    <- rchisq(n_samples, df = df_resid)
-sigma2_tilde <- (df_resid * scale_resid) / chi_draws
+cat('X dimensions:', n, 'x', p, '\n')
+cat('y mean after zip adjustment:', mean(y), '\n')
+cat('y sd after zip adjustment:',  sd(y),   '\n')
+```
 
-XtX_inv <- solve(t(X) %*% X)
-w_tilde  <- matrix(0, nrow = n_samples, ncol = p)
+
+```{r}
+# Priors for w
+# Zero prior mean for all three weights:
+# - Intercept: should be near zero after zip adjustment
+# - sin/cos: no seasonality is a reasonable null assumption,
+#   the data will push these away from zero if seasonality exists
+# Prior variance of 10 is relatively uninformative —
+# we're not strongly penalizing large seasonal effects
+prior_w     <- matrix(rep(0, p), ncol = 1)
+prior_Sigma <- diag(p) * 10
+
+# Priors for sigma2
+# Alpha = 3 is a weakly informative shape
+# Beta anchored to empirical variance of adjusted y
+# so the prior is on the right scale for your data
+prior_alpha <- 3
+prior_beta  <- var(y) * 2
+```
+
+```{r}
+# Storage and initialization
+n_samples <- 10000
+gibbs_samples_w      <- matrix(0, nrow = n_samples, ncol = p)
+gibbs_samples_sigma2 <- matrix(0, nrow = n_samples, ncol = 1)
+
+# Initialize at sensible starting values
+w_tilde      <- matrix(0, nrow = p, ncol = 1)
+sigma2_tilde <- var(y)
+
+
 for (i in 1:n_samples) {
-  L            <- chol(XtX_inv * sigma2_tilde[i])
-  w_tilde[i, ] <- w_hat + t(L) %*% rnorm(p)
+  # Conditional posterior for w given sigma2
+  V       <- solve((1/sigma2_tilde) * t(X) %*% X + solve(prior_Sigma))
+  M       <- V %*% ((1/sigma2_tilde) * t(X) %*% y + 
+                    solve(prior_Sigma) %*% prior_w)
+  L       <- chol(V)
+  w_tilde <- M + t(L) %*% rnorm(p)
+
+  # Conditional posterior for sigma2 given w
+  A            <- prior_alpha + n / 2
+  B            <- prior_beta + 0.5 * sum((y - X %*% w_tilde)^2)
+  
+  # Sample from inverse gamma using base R only
+  sigma2_tilde <- 1 / rgamma(1, shape = A, rate = B)
+
+  gibbs_samples_w[i, ]      <- w_tilde
+  gibbs_samples_sigma2[i, ] <- sigma2_tilde
 }
 
-cat('w_hat:\n');                  print(w_hat)
-cat('Posterior weight means:\n'); print(colMeans(w_tilde))
+cat('Posterior weight means:\n')
+print(colMeans(gibbs_samples_w))
+cat('Posterior sigma2 mean:\n')
+print(mean(gibbs_samples_sigma2))
+```
+
+```{r}
+# Convergence diagnostics
+# Always check these before trusting the posterior samples.
+# The trace plots should look like white noise with no drift.
+# The ACF should drop to near zero quickly.
+# If either looks bad, you may need more samples or thinning.
+par(mfrow = c(2, 3))
+plot(gibbs_samples_w[,1],      type = 'l', main = 'Trace: Intercept')
+plot(gibbs_samples_w[,2],      type = 'l', main = 'Trace: sin')
+plot(gibbs_samples_w[,3],      type = 'l', main = 'Trace: cos')
+plot(gibbs_samples_sigma2,     type = 'l', main = 'Trace: sigma2')
+acf(gibbs_samples_w[,2],                   main = 'ACF: sin')
+acf(gibbs_samples_sigma2,                  main = 'ACF: sigma2')
+par(mfrow = c(1, 1))
 ```
 
 ### Evaluation
 ```{r}
-### Evaluate
-X_test <- cbind(1, as.matrix(test_df %>% dplyr::select(all_of(FEATURES))))
-y_test <- test_df$zorf - test_df$tier_mean   # center test y the same way
-y_pred <- X_test %*% colMeans(w_tilde)
+# Posterior predictive for test set
+# Build the test X matrix the same way as training
+y_test <- test_df$zorf - test_df$zip_mean
+X_test <- cbind(
+  intercept  = 1,
+  sin_season = test_df$sin_season,
+  cos_season = test_df$cos_season
+)
 
-# Add tier mean back to get predictions in original dollar scale
-y_pred_dollars <- y_pred + test_df$tier_mean
-y_test_dollars <- test_df$zorf
+n_test          <- nrow(X_test)
+post_pred_means <- numeric(n_test)
+post_pred_lower <- numeric(n_test)
+post_pred_upper <- numeric(n_test)
 
-rmse <- sqrt(mean((y_pred_dollars - y_test_dollars)^2))
-corr <- cor(y_pred_dollars, y_test_dollars)
-cat(sprintf('Test RMSE: %.4f\n', rmse))
-cat(sprintf('Test Correlation: %.4f\n', corr))
-```
-
-
-### Running predictions
-```{r}
-predict_zip <- function(zip_code) {
-  zip_info  <- zip_means %>% filter(ZipCode == as.character(zip_code))
-
-  if (nrow(zip_info) == 0) {
-    cat(sprintf('Zip code %s not found.\n', zip_code))
-    return(invisible(NULL))
-  }
-
-  tier_info <- tier_means %>% filter(tier == zip_info$tier)
-  x_new     <- c(1, tier_info$tier_mean)
-
-  preds <- sapply(1:n_samples, function(i) {
-    rnorm(1, mean = t(w_tilde[i, ]) %*% x_new, sd = sqrt(sigma2_tilde[i]))
-  })
-
-  # Add tier mean back to convert from deviation to dollar scale
-  preds_dollars <- preds + tier_info$tier_mean
-
-  pred_mean <- mean(preds_dollars)
-  ci        <- quantile(preds_dollars, c(0.025, 0.975))
-
-  cat(sprintf('\nZip Code: %s\n', zip_code))
-  cat(sprintf('Tier: %s\n', zip_info$tier))
-  cat(sprintf('Predicted ZORF: $%.2f\n', pred_mean))
-  cat(sprintf('95%% CI: [$%.2f, $%.2f]\n', ci[1], ci[2]))
+for (j in 1:n_test) {
+  # For each test observation, generate a full
+  # posterior predictive distribution by plugging
+  # each posterior draw of w and sigma2 into the likelihood
+  preds <- rnorm(
+    n    = n_samples,
+    mean = gibbs_samples_w %*% X_test[j, ],
+    sd   = sqrt(gibbs_samples_sigma2)
+  )
+  post_pred_means[j] <- mean(preds)
+  # 90% credible interval — the Bayesian analog of a
+  # confidence interval, directly interpretable as
+  # "we believe true rent falls in this range with 90% probability"
+  post_pred_lower[j] <- quantile(preds, 0.05)
+  post_pred_upper[j] <- quantile(preds, 0.95)
 }
+
+# Add zip mean back to get predictions on original rent scale
+final_preds <- post_pred_means + test_df$zip_mean
+final_lower <- post_pred_lower  + test_df$zip_mean
+final_upper <- post_pred_upper  + test_df$zip_mean
+
+# Evaluation
+rmse <- sqrt(mean((final_preds - test_df$zorf)^2))
+coverage <- mean(test_df$zorf >= final_lower & 
+                 test_df$zorf <= final_upper)
+
+cat('Test RMSE:', rmse, '\n')
+cat('90% credible interval coverage:', coverage, '\n')
 ```
 
-
 ```{r}
-predict_zip('02115')
-predict_zip('02148')
-predict_zip('02120')
+# Choose your zip code of interest
+target_zip <- "02115"  # example — Fenway/Northeastern area
+
+# Check if this zip code was in training data
+if (!target_zip %in% zip_means$ZipCode) {
+  cat('Warning: zip code not seen in training, using overall mean\n')
+  zip_baseline <- overall_mean
+} else {
+  zip_baseline <- zip_means$zip_mean[zip_means$ZipCode == target_zip]
+}
+cat('Zip baseline rent:', zip_baseline, '\n')
 ```
 
