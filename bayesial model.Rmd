@@ -87,6 +87,13 @@ long_df$sin_season <- sin(2 * pi * month_num / 12)
 long_df$cos_season <- cos(2 * pi * month_num / 12)
 ```
 
+```{r}
+long_df <- long_df %>%
+  mutate(
+    time_index = as.numeric(date - min(date)) / 365  # years since start
+  )
+```
+
 
 ## Building the model
 
@@ -156,6 +163,7 @@ y <- train_df$zorf - train_df$zip_mean
 
 X <- cbind(
   intercept  = 1,
+  time_index = train_df$time_index,
   sin_season = train_df$sin_season,
   cos_season = train_df$cos_season
 )
@@ -247,6 +255,7 @@ par(mfrow = c(1, 1))
 y_test <- test_df$zorf - test_df$zip_mean
 X_test <- cbind(
   intercept  = 1,
+  time_index = test_df$time_index,
   sin_season = test_df$sin_season,
   cos_season = test_df$cos_season
 )
@@ -286,6 +295,29 @@ coverage <- mean(test_df$zorf >= final_lower &
 cat('Test RMSE:', rmse, '\n')
 cat('90% credible interval coverage:', coverage, '\n')
 ```
+
+```{r}
+cat('Posterior sigma2 mean:', mean(gibbs_samples_sigma2), '\n')
+cat('Posterior sigma2 sd:',   sd(gibbs_samples_sigma2),   '\n')
+cat('Posterior sigma sd (sqrt):', mean(sqrt(gibbs_samples_sigma2)), '\n')
+
+cat('y (zip-adjusted) sd:',  sd(y), '\n')
+cat('y (original) sd:',      sd(train_df$zorf), '\n')
+cat('Residual sd (OLS):',    
+    sd(y - X %*% colMeans(gibbs_samples_w)), '\n')
+```
+```{r}
+cat('final_lower range:', range(final_lower), '\n')
+cat('final_upper range:', range(final_upper), '\n')
+cat('CI width (mean):',   mean(final_upper - final_lower), '\n')
+cat('zorf range:',        range(test_df$zorf), '\n')
+```
+```{r}
+cat('time_index range:', range(train_df$time_index), '\n')
+cat('time_index mean:',  mean(train_df$time_index),  '\n')
+```
+
+
 
 ```{r}
 # Choose your zip code of interest
