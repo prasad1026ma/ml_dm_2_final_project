@@ -11,6 +11,7 @@ library(tidyr)
 library(dplyr)
 ```
 
+## Reading in the Data
 ```{r}
 df <- read.csv('boston_cleaned_data.csv', colClasses = c(ZipCode = 'character'))
  
@@ -19,6 +20,7 @@ meta_cols <- c('RegionID', 'SizeRank', 'ZipCode', 'RegionType',
 date_cols <- setdiff(colnames(df), meta_cols)
 ```
 
+## Converting data to long form
 ```{r}
 long_df <- df %>%
   pivot_longer(cols = all_of(date_cols), names_to = 'date', values_to = 'zorf') %>%
@@ -31,14 +33,47 @@ long_df <- df %>%
   )
 ```
 
+## EDA
+
+### Test 1: How do different zipcode rental prices change over time?
 ```{r}
-cat('nrow long_df:', nrow(long_df), '\n')
-print(head(long_df))
-print(range(long_df$date))
+long_df %>%
+  group_by(ZipCode) %>%
+  summarise(mean_zorf = mean(zorf)) %>%
+  arrange(desc(mean_zorf))
+```
+
+```{r}
+long_df %>%
+  ggplot(aes(x = date, y = zorf, color = ZipCode)) +
+  geom_line() +
+  theme_minimal() +
+  labs(title = 'ZORF over time by Zip Code')
+```
+Lines follow the same patterns over time (all dip during covid) and looking at seasonality, seasonal and market trends are shared across zip codes.
+However the baseline in which they operate are drastically different.
+
+
+```{r}
+train_df %>%
+  ggplot(aes(x = reorder(ZipCode, zorf, median), y = zorf)) +
+  geom_boxplot() +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = 'ZORF distribution by Zip Code',
+       x = 'Zip Code', y = 'ZORF')
 ```
 
 
-Train test split
+```{r}
+anova_result <- aov(zorf ~ ZipCode, data = long_df)
+summary(anova_result)
+```
+One-way ANOVA tests whether the variation in ZORF between zip codes is large enough relative to the variation within zip codes to be considered statistically significant
+With a result of (F=146.7, p<2e-16) means the zip code differences are overwhelmingly real and not due to chance, justifying the use of zip-level random effects in the model.
+
+
+## Building the model
 
 ```{r}
 split_idx <- floor(nrow(long_df) * 0.8)
@@ -50,88 +85,121 @@ cat('nrow test_df:', nrow(test_df), '\n')
 ```
 
 
+### Zip-level Random Effects
 ```{r}
-FEATURES <- c()
+grand_mean   <- mean(long_df$zorf)
+sd_threshold <- sd(long_df$zorf)
 
-y <- train_df$zorf
-X <- as.matrix(rep(1, nrow(train_df)))
-cat('nrow X:', nrow(X), '\n')
-print(head(X))
-print(t(X) %*% X)
+zip_means <- long_df %>%
+  group_by(ZipCode) %>%
+  summarise(zip_mean = mean(zorf)) %>%
+  mutate(
+    deviation = zip_mean - grand_mean,
+    tier      = case_when(
+      deviation >  sd_threshold ~ 'high',
+      deviation < -sd_threshold ~ 'low',
+      TRUE                      ~ 'mid'
+    )
+  )
+```
+Zip codes were grouped into three tiers, high, mid, and low, based on whether their mean ZORF deviated from the grand mean by more than one standard deviation. This threshold was chosen because it reflects a statistically meaningful departure from typical Boston rent levels, and the resulting tiers align naturally with known neighborhood-specific market dynamics.
+
+Adding those features back to our dataset
+```{r}
+# Step 1: join tier into train and test via ZipCode
+train_df <- train_df %>%
+  left_join(zip_means %>% dplyr::select(ZipCode, tier), by = 'ZipCode')
+test_df <- test_df %>%
+  left_join(zip_means %>% dplyr::select(ZipCode, tier), by = 'ZipCode')
+
+# Compute tier_means from long_df (not train_df)
+tier_means <- long_df %>%
+  left_join(zip_means %>% dplyr::select(ZipCode, tier), by = 'ZipCode') %>%
+  group_by(tier) %>%
+  summarise(tier_mean = mean(zorf))
+
+# Step 2: join tier_mean via tier
+train_df <- train_df %>%
+  left_join(tier_means, by = 'tier')
+test_df <- test_df %>%
+  left_join(tier_means, by = 'tier')
 ```
 
+### Training the Model
 ```{r}
-#
-#   w_hat       <- solve(t(X)%*%X) %*% t(X) %*% y
-#   sigma2[i]   <- sample from scaled inverse chi-squared
-#   w_tilde[i,] <- sample from multivariate normal given sigma2[i]
- 
- 
- 
+### Training the Model
+FEATURES  <- c('tier_mean')
+# FEATURES <- c(FEATURES, 'is_before_september', 'zordi', 'avg_temp')
+
+n_samples <- 10000
+
+# Center y by tier mean — model learns deviations from tier baseline
+y <- train_df$zorf - train_df$tier_mean
+X <- cbind(1, as.matrix(train_df %>% dplyr::select(all_of(FEATURES))))
+
 n <- nrow(X)
 p <- ncol(X)
- 
-# OLS estimate — posterior mean starting point
-w_hat <- solve(t(X) %*% X) %*% t(X) %*% y
-cat('w_hat:\n'); print(w_hat)
- 
-# Sample sigma^2 from scaled inverse chi-squared
-# InvChiSq(df, scale) = draw u ~ ChiSq(df), then sigma2 = df*scale/u
-n_samples    <- 10000
+
+w_hat        <- solve(t(X) %*% X) %*% t(X) %*% y
 df_resid     <- n - p
 scale_resid  <- (t(y - X %*% w_hat) %*% (y - X %*% w_hat) / df_resid)[1, 1]
 chi_draws    <- rchisq(n_samples, df = df_resid)
 sigma2_tilde <- (df_resid * scale_resid) / chi_draws
- 
-# Sample weights from multivariate normal for each sigma^2
-# w_tilde[i,] ~ MVN(w_hat, solve(t(X)%*%X) * sigma2[i])
+
 XtX_inv <- solve(t(X) %*% X)
-w_tilde <- matrix(0, nrow = n_samples, ncol = p)
+w_tilde  <- matrix(0, nrow = n_samples, ncol = p)
 for (i in 1:n_samples) {
-  cov_i      <- XtX_inv * sigma2_tilde[i]
-  L          <- chol(cov_i)                          # Cholesky for MVN sampling
+  L            <- chol(XtX_inv * sigma2_tilde[i])
   w_tilde[i, ] <- w_hat + t(L) %*% rnorm(p)
 }
- 
+
+cat('w_hat:\n');                  print(w_hat)
 cat('Posterior weight means:\n'); print(colMeans(w_tilde))
 ```
 
-currently running an intercept-only model right now, that single weight is essentially just the mean ZORF across all your training data
-
-
+### Evaluation
 ```{r}
-X_test <- cbind(1, as.matrix(test_df[, FEATURES]))
-y_test <- test_df$zorf
+### Evaluate
+X_test <- cbind(1, as.matrix(test_df %>% dplyr::select(all_of(FEATURES))))
+y_test <- test_df$zorf - test_df$tier_mean   # center test y the same way
 y_pred <- X_test %*% colMeans(w_tilde)
- 
-rmse <- sqrt(mean((y_pred - y_test)^2))
-corr <- cor(y_pred, y_test)
-cat(sprintf('\nTest RMSE: %.4f\n', rmse))
+
+# Add tier mean back to get predictions in original dollar scale
+y_pred_dollars <- y_pred + test_df$tier_mean
+y_test_dollars <- test_df$zorf
+
+rmse <- sqrt(mean((y_pred_dollars - y_test_dollars)^2))
+corr <- cor(y_pred_dollars, y_test_dollars)
+cat(sprintf('Test RMSE: %.4f\n', rmse))
 cat(sprintf('Test Correlation: %.4f\n', corr))
 ```
 
+
+### Running predictions
 ```{r}
 predict_zip <- function(zip_code) {
-  rows <- long_df %>% filter(ZipCode == as.character(zip_code))
- 
-  if (nrow(rows) == 0) {
+  zip_info  <- zip_means %>% filter(ZipCode == as.character(zip_code))
+
+  if (nrow(zip_info) == 0) {
     cat(sprintf('Zip code %s not found.\n', zip_code))
     return(invisible(NULL))
   }
- 
-  latest <- rows %>% slice_tail(n = 1)
-  x_new  <- c(1, latest$is_before_september)
-  # x_new <- c(x_new, latest$close_to_university, latest$zordi, latest$avg_temp)
- 
-  # Posterior predictive: rnorm(1, mean = t(w_tilde[i,]) %*% x_new, sd = sqrt(sigma2[i]))
+
+  tier_info <- tier_means %>% filter(tier == zip_info$tier)
+  x_new     <- c(1, tier_info$tier_mean)
+
   preds <- sapply(1:n_samples, function(i) {
     rnorm(1, mean = t(w_tilde[i, ]) %*% x_new, sd = sqrt(sigma2_tilde[i]))
   })
- 
-  pred_mean <- mean(preds)
-  ci        <- quantile(preds, c(0.025, 0.975))
- 
+
+  # Add tier mean back to convert from deviation to dollar scale
+  preds_dollars <- preds + tier_info$tier_mean
+
+  pred_mean <- mean(preds_dollars)
+  ci        <- quantile(preds_dollars, c(0.025, 0.975))
+
   cat(sprintf('\nZip Code: %s\n', zip_code))
+  cat(sprintf('Tier: %s\n', zip_info$tier))
   cat(sprintf('Predicted ZORF: $%.2f\n', pred_mean))
   cat(sprintf('95%% CI: [$%.2f, $%.2f]\n', ci[1], ci[2]))
 }
@@ -139,6 +207,8 @@ predict_zip <- function(zip_code) {
 
 
 ```{r}
+predict_zip('02115')
+predict_zip('02148')
 predict_zip('02120')
 ```
 
