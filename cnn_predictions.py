@@ -1,83 +1,109 @@
 import pandas as pd
 import numpy as np
-import keras
-from keras.models import Model
-from keras.layers import Input, Conv1D, MaxPooling1D, Flatten, Dense
-from keras.optimizers import SGD
-from keras.losses import BinaryCrossentropy
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-
-df = pd.read_csv('boston_cleaned_data.csv', dtype={'ZipCode': str})
-
-meta_cols = ['RegionID', 'SizeRank', 'ZipCode', 'RegionType',
-             'StateName', 'State', 'City', 'Metro', 'CountyName']
-date_cols = [c for c in df.columns if c not in meta_cols]
+from manual_neural_network import ManualNN
 
 SEQ_LEN = 12
-X, y = [], []
 
-TRAIN_RATIO = 0.8
-X_train, y_train, X_test, y_test = [], [], [], []
+class MinMaxScaler:
+    def fit(self, data):
+        self.min = np.min(data)
+        self.max = np.max(data)
+        return self
+    def transform(self, data):
+        if self.max == self.min:
+            return np.zeros_like(data, dtype=float)
+        return (data - self.min) / (self.max - self.min)
 
-for _, row in df.iterrows():
-    prices = row[date_cols].values.astype(float)
+    def fit_transform(self, data):
+        return self.fit(data).transform(data)
+
+
+def load_data(filepath):
+    df = pd.read_csv(filepath, dtype={'ZipCode': str})
+    return df
+
+def get_date_columns(df):
+    meta_cols = ['RegionID', 'SizeRank', 'ZipCode', 'RegionType',
+                 'StateName', 'State', 'City', 'Metro', 'CountyName']
+    date_cols = [c for c in df.columns if c not in meta_cols]
+    return date_cols
+
+def scale_prices(prices):
+    scaler = MinMaxScaler()
+    return scaler.fit_transform(prices), scaler
+
+
+def create_sequences(prices, seq_len=12):
+    X, y = [], []
+
+    for i in range(seq_len, len(prices)):
+        seq = prices[i - seq_len:i]
+        rolling_avg = np.mean(prices[i - 6:i])
+        label = 1 if prices[i] < rolling_avg else 0
+        X.append(seq)
+        y.append(label)
+
+    return np.array(X), np.array(y).reshape(-1, 1)
+
+
+def process_data(prices, date_cols, train_ratio=0.8):
     prices = prices[~np.isnan(prices)]
 
     if len(prices) < SEQ_LEN + 6:
-        continue
+        return None
 
-    split = int(len(prices) * TRAIN_RATIO)
-
+    split = int(len(prices) * train_ratio)
     train_prices = prices[:split]
     test_prices = prices[split:]
 
     scaler = MinMaxScaler()
-    train_scaled = scaler.fit_transform(train_prices.reshape(-1,1)).flatten()
-    test_scaled = scaler.transform(test_prices.reshape(-1,1)).flatten()
+    train_scaled = scaler.fit_transform(train_prices)
+    test_scaled = scaler.transform(test_prices)
 
-    # TRAIN sequences
-    for i in range(SEQ_LEN, len(train_scaled)):
-        seq = train_scaled[i-SEQ_LEN:i]
-        rolling_avg = np.mean(train_scaled[i-6:i])
-        label = 1 if train_scaled[i] < rolling_avg else 0
-        X_train.append(seq)
-        y_train.append(label)
+    X_train, y_train = create_sequences(train_scaled, SEQ_LEN)
 
-    # TEST sequences (use last train window for continuity)
     combined = np.concatenate([train_scaled[-SEQ_LEN:], test_scaled])
+    X_test, y_test = create_sequences(combined, SEQ_LEN)
 
-    for i in range(SEQ_LEN, len(combined)):
-        seq = combined[i-SEQ_LEN:i]
-        rolling_avg = np.mean(combined[i-6:i])
-        label = 1 if combined[i] < rolling_avg else 0
-        X_test.append(seq)
-        y_test.append(label)
+    return X_train, y_train, X_test, y_test
 
-X_train = np.array(X_train).reshape(-1, SEQ_LEN, 1)
-X_test = np.array(X_test).reshape(-1, SEQ_LEN, 1)
-y_train = np.array(y_train)
-y_test = np.array(y_test)
 
-inpx = Input(shape=(SEQ_LEN, 1))
-conv_layer = Conv1D(filters=1, kernel_size=3, strides=1, activation=None, padding='valid')(inpx)
-pool_layer = MaxPooling1D(pool_size=3)(conv_layer)
+def model_eval(model, X_train, y_train, X_test, y_test, epochs, batch_size):
+    """Create a new ManualNN model"""
+    model.train(X_train, y_train, epochs=epochs, batch_size=batch_size, validation_split=0.2)
+    loss, acc = model.evaluate(X_test, y_test)
+    return loss, acc
 
-flat_G = Flatten()(pool_layer)
 
-hid_layer = Dense(250, activation='relu')(flat_G)
-hid_layer2 = Dense(100, activation='tanh')(hid_layer)
-out_layer = Dense(1, activation='sigmoid')(hid_layer2)
 
-model = Model(inputs=[inpx], outputs=out_layer)
-model.compile(optimizer=SGD(), loss=BinaryCrossentropy, metrics=['accuracy'])
-model.summary()
-model.fit(X_train, y_train, epochs=20, batch_size=32, validation_split=0.2, verbose=1)
+def prepare_training_data(df, date_cols):
+    X_train_all, y_train_all = [], []
+    X_test_all, y_test_all = [], []
 
-loss, acc = model.evaluate(X_test, y_test, verbose=0)
-print(f"Test Accuracy: {acc:.4f}")
+    for idx, row in df.iterrows():
+        prices = row[date_cols].values.astype(float)
+        result = process_data(prices, date_cols)
+        if result is None:
+            continue
 
-def predict_zip(zip_code):
+        X_train, y_train, X_test, y_test = result
+
+        X_train_all.append(X_train)
+        y_train_all.append(y_train)
+        X_test_all.append(X_test)
+        y_test_all.append(y_test)
+
+        print(f"Processed region {idx + 1}/{len(df)}")
+
+    X_train = np.concatenate(X_train_all, axis=0)
+    y_train = np.concatenate(y_train_all, axis=0)
+    X_test = np.concatenate(X_test_all, axis=0)
+    y_test = np.concatenate(y_test_all, axis=0)
+
+    return X_train, y_train, X_test, y_test
+
+
+def predict_zip(df, date_cols, model, zip_code):
     match = df[df['ZipCode'] == str(zip_code).strip()]
     if match.empty:
         print(f"Zip code {zip_code} not found.")
@@ -90,13 +116,11 @@ def predict_zip(zip_code):
         print("Not enough data for prediction.")
         return
 
-    # IMPORTANT: fit scaler on historical prices ONLY for this ZIP
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(prices.reshape(-1,1)).flatten()
+    scaled = scaler.fit_transform(prices)
+    seq = scaled[-SEQ_LEN:].reshape(1, SEQ_LEN)
 
-    seq = scaled[-SEQ_LEN:].reshape(1, SEQ_LEN, 1)
-
-    prob = model.predict(seq, verbose=0)[0][0]
+    prob = model.predict(seq)[0][0]
 
     print(f"Zip Code: {zip_code}")
     print(f"Good to rent confidence: {prob:.2%}")
@@ -107,4 +131,23 @@ def predict_zip(zip_code):
     else:
         print("No clear signal")
 
-predict_zip('02115')
+
+def main():
+    print("Loading data...")
+    df = load_data('boston_cleaned_data.csv')
+    date_cols = get_date_columns(df)
+    print(f"Loaded {len(df)} regions\n")
+
+    print("Preparing training data...")
+    X_train, y_train, X_test, y_test = prepare_training_data(df, date_cols)
+
+    learning_rate = 0.01
+    model = ManualNN(input_size=SEQ_LEN, learning_rate=learning_rate)
+    model_eval(model, X_train, y_train, X_test, y_test, epochs=20, batch_size=32)
+
+    predict_zip(df, date_cols, model, '02115')
+    predict_zip(df, date_cols, model, '02114')
+
+
+if __name__ == "__main__":
+    main()
