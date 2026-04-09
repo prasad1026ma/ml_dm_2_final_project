@@ -1,0 +1,144 @@
+---
+title: "bayesion model"
+author: "Krithika Natarajan"
+date: "2026-04-09"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+install.packages(c('tidyr', 'dplyr'))
+library(tidyr)
+library(dplyr)
+```
+
+```{r}
+df <- read.csv('boston_cleaned_data.csv', colClasses = c(ZipCode = 'character'))
+ 
+meta_cols <- c('RegionID', 'SizeRank', 'ZipCode', 'RegionType',
+               'StateName', 'State', 'City', 'Metro', 'CountyName')
+date_cols <- setdiff(colnames(df), meta_cols)
+```
+
+```{r}
+long_df <- df %>%
+  pivot_longer(cols = all_of(date_cols), names_to = 'date', values_to = 'zorf') %>%
+  mutate(date = as.Date(gsub('\\.', '-', gsub('^X', '', date)))) %>%
+  arrange(ZipCode, date) %>%
+  filter(!is.na(zorf), !is.na(date)) %>%  # filter first
+  mutate(                                  # then add features
+    month               = as.integer(format(date, '%m')),
+    is_before_september = as.integer(month < 9)
+  )
+```
+
+```{r}
+cat('nrow long_df:', nrow(long_df), '\n')
+print(head(long_df))
+print(range(long_df$date))
+```
+
+
+Train test split
+
+```{r}
+split_idx <- floor(nrow(long_df) * 0.8)
+train_df <- long_df %>% slice(1:split_idx)
+test_df  <- long_df %>% slice((split_idx + 1):nrow(long_df))
+
+cat('nrow train_df:', nrow(train_df), '\n')
+cat('nrow test_df:', nrow(test_df), '\n')
+```
+
+
+```{r}
+FEATURES <- c()
+
+y <- train_df$zorf
+X <- as.matrix(rep(1, nrow(train_df)))
+cat('nrow X:', nrow(X), '\n')
+print(head(X))
+print(t(X) %*% X)
+```
+
+```{r}
+#
+#   w_hat       <- solve(t(X)%*%X) %*% t(X) %*% y
+#   sigma2[i]   <- sample from scaled inverse chi-squared
+#   w_tilde[i,] <- sample from multivariate normal given sigma2[i]
+ 
+ 
+ 
+n <- nrow(X)
+p <- ncol(X)
+ 
+# OLS estimate — posterior mean starting point
+w_hat <- solve(t(X) %*% X) %*% t(X) %*% y
+cat('w_hat:\n'); print(w_hat)
+ 
+# Sample sigma^2 from scaled inverse chi-squared
+# InvChiSq(df, scale) = draw u ~ ChiSq(df), then sigma2 = df*scale/u
+n_samples    <- 10000
+df_resid     <- n - p
+scale_resid  <- (t(y - X %*% w_hat) %*% (y - X %*% w_hat) / df_resid)[1, 1]
+chi_draws    <- rchisq(n_samples, df = df_resid)
+sigma2_tilde <- (df_resid * scale_resid) / chi_draws
+ 
+# Sample weights from multivariate normal for each sigma^2
+# w_tilde[i,] ~ MVN(w_hat, solve(t(X)%*%X) * sigma2[i])
+XtX_inv <- solve(t(X) %*% X)
+w_tilde <- matrix(0, nrow = n_samples, ncol = p)
+for (i in 1:n_samples) {
+  cov_i      <- XtX_inv * sigma2_tilde[i]
+  L          <- chol(cov_i)                          # Cholesky for MVN sampling
+  w_tilde[i, ] <- w_hat + t(L) %*% rnorm(p)
+}
+ 
+cat('Posterior weight means:\n'); print(colMeans(w_tilde))
+```
+
+currently running an intercept-only model right now, that single weight is essentially just the mean ZORF across all your training data
+
+
+```{r}
+X_test <- cbind(1, as.matrix(test_df[, FEATURES]))
+y_test <- test_df$zorf
+y_pred <- X_test %*% colMeans(w_tilde)
+ 
+rmse <- sqrt(mean((y_pred - y_test)^2))
+corr <- cor(y_pred, y_test)
+cat(sprintf('\nTest RMSE: %.4f\n', rmse))
+cat(sprintf('Test Correlation: %.4f\n', corr))
+```
+
+```{r}
+predict_zip <- function(zip_code) {
+  rows <- long_df %>% filter(ZipCode == as.character(zip_code))
+ 
+  if (nrow(rows) == 0) {
+    cat(sprintf('Zip code %s not found.\n', zip_code))
+    return(invisible(NULL))
+  }
+ 
+  latest <- rows %>% slice_tail(n = 1)
+  x_new  <- c(1, latest$is_before_september)
+  # x_new <- c(x_new, latest$close_to_university, latest$zordi, latest$avg_temp)
+ 
+  # Posterior predictive: rnorm(1, mean = t(w_tilde[i,]) %*% x_new, sd = sqrt(sigma2[i]))
+  preds <- sapply(1:n_samples, function(i) {
+    rnorm(1, mean = t(w_tilde[i, ]) %*% x_new, sd = sqrt(sigma2_tilde[i]))
+  })
+ 
+  pred_mean <- mean(preds)
+  ci        <- quantile(preds, c(0.025, 0.975))
+ 
+  cat(sprintf('\nZip Code: %s\n', zip_code))
+  cat(sprintf('Predicted ZORF: $%.2f\n', pred_mean))
+  cat(sprintf('95%% CI: [$%.2f, $%.2f]\n', ci[1], ci[2]))
+}
+```
+
+
+```{r}
+predict_zip('02120')
+```
+

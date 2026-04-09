@@ -22,4 +22,20 @@ def clean_zori_data():
     boston_df.to_csv('boston_cleaned_data.csv', index = False)
 
 
+def reshape_to_long(wide_df):
+    meta_cols = ['RegionID', 'SizeRank', 'ZipCode', 'RegionType',
+                 'StateName', 'State', 'City', 'Metro', 'CountyName']
+    date_cols = [c for c in wide_df.columns if c not in meta_cols]
+ 
+    long_df = wide_df.melt(
+        id_vars=meta_cols,
+        value_vars=date_cols,
+        var_name='date',
+        value_name='zori'
+    )
+    long_df['date'] = pd.to_datetime(long_df['date'])
+    long_df = long_df.sort_values(['ZipCode', 'date']).reset_index(drop=True)
+    return long_df
+
 clean_zori_data()
+reshape_to_long()
