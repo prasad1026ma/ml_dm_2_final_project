@@ -6,30 +6,37 @@ output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
-install.packages(c('tidyr', 'dplyr'))
+install.packages(c('tidyr', 'dplyr', 'brms', 'ggplot2'))
 library(tidyr)
 library(dplyr)
+library(ggplot2)
+library(brms)
 ```
 
+
+
 ## Reading in the Data
+
 ```{r}
 df <- read.csv('boston_cleaned_data.csv', colClasses = c(ZipCode = 'character'))
  
 meta_cols <- c('RegionID', 'SizeRank', 'ZipCode', 'RegionType',
-               'StateName', 'State', 'City', 'Metro', 'CountyName')
+               'StateName', 'State', 'City', 'Metro', 'CountyName','Neighborhood',
+               'HasUniversity')
 date_cols <- setdiff(colnames(df), meta_cols)
 ```
 
 ## Converting data to long form
 ```{r}
 long_df <- df %>%
-  pivot_longer(cols = all_of(date_cols), names_to = 'date', values_to = 'zorf') %>%
+  pivot_longer(cols = all_of(date_cols), 
+               names_to = 'date', values_to = 'zorf') %>%
   mutate(date = as.Date(gsub('\\.', '-', gsub('^X', '', date)))) %>%
   arrange(ZipCode, date) %>%
-  filter(!is.na(zorf), !is.na(date)) %>%  # filter first
-  mutate(                                  # then add features
-    month               = as.integer(format(date, '%m')),
-    is_before_september = as.integer(month < 9)
+  filter(!is.na(zorf), !is.na(date)) %>%
+  mutate(
+    HasUniversity = as.integer(HasUniversity),
+    Neighborhood  = as.factor(Neighborhood)
   )
 ```
 
@@ -55,7 +62,7 @@ However the baseline in which they operate are drastically different.
 
 
 ```{r}
-train_df %>%
+long_df %>%
   ggplot(aes(x = reorder(ZipCode, zorf, median), y = zorf)) +
   geom_boxplot() +
   coord_flip() +
@@ -76,24 +83,14 @@ With a result of (F=146.7, p<2e-16) means the zip code differences are overwhelm
 ### Introducing Seasonality
 
 ```{r}
-long_df <- long_df %>% arrange(date)
-```
-
-```{r}
-
-# Recompute seasonality after sorting just to be safe
-month_num <- as.numeric(format(long_df$date, "%m"))
-long_df$sin_season <- sin(2 * pi * month_num / 12)
-long_df$cos_season <- cos(2 * pi * month_num / 12)
-```
-
-```{r}
 long_df <- long_df %>%
   mutate(
-    time_index = as.numeric(date - min(date)) / 365  # years since start
+    time_index = as.numeric(date - min(date)) / 365,
+    month_num  = as.numeric(format(date, '%m')),
+    sin_season = sin(2 * pi * month_num / 12),
+    cos_season = cos(2 * pi * month_num / 12)
   )
 ```
-
 
 ## Building the model
 
@@ -106,230 +103,122 @@ cat('nrow train_df:', nrow(train_df), '\n')
 cat('nrow test_df:',  nrow(test_df),  '\n')
 ```
 
-
-### Zip-level Random Effects
 ```{r}
-zip_means <- train_df %>%
+# Do higher-rent zips have higher variance?
+train_df %>%
   group_by(ZipCode) %>%
-  summarise(
-    zip_mean = mean(zorf),
-    n_obs    = n()  # keep track of how many observations
-                    # each zip code contributed — useful for
-                    # diagnosing which zip codes are sparse
-  )
-
-cat('Zip code observation counts:\n')
-print(summary(zip_means$n_obs))
+  summarise(mean_zorf = mean(zorf), sd_zorf = sd(zorf)) %>%
+  ggplot(aes(x = mean_zorf, y = sd_zorf)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  labs(title = 'Mean vs SD of ZORF by Zip Code',
+       x = 'Mean ZORF', y = 'SD ZORF')
 ```
 
 
 ```{r}
-overall_mean <- mean(train_df$zorf)
-
-# Join zip means into training data
-train_df <- train_df %>%
-  left_join(zip_means %>% dplyr::select(ZipCode, zip_mean), 
-            by = 'ZipCode')
-
-# Join zip means into test data
-# Any zip code in test that wasn't seen in training
-# gets the overall training mean as its baseline.
-# This is conservative — we're saying we have no
-# neighborhood-specific information for this zip code
-# so we assume it behaves like an average neighborhood.
-test_df <- test_df %>%
-  left_join(zip_means %>% dplyr::select(ZipCode, zip_mean), 
-            by = 'ZipCode') %>%
-  mutate(zip_mean = ifelse(is.na(zip_mean), overall_mean, zip_mean))
-
-# Check how many test zip codes needed the fallback
-n_fallback <- sum(is.na(test_df$zip_mean) | 
-                  test_df$zip_mean == overall_mean)
-cat('Test observations using fallback mean:', n_fallback, '\n')
+# initial priors
+default_prior(zorf ~ time_index + sin_season + cos_season +
+                HasUniversity + (1 | ZipCode) + (1 | Neighborhood),
+              data   = train_df,
+              family = Gamma(link = 'log'))
 ```
 
-
-### Training the Model
 ```{r}
-# Build y and X for training
-# Subtract zip-level mean from y.
-# The model now learns seasonal patterns and 
-# residual variance on top of the neighborhood baseline,
-# rather than having to explain both at once.
-# The intercept in X should be close to zero on average
-# since the zip means have already absorbed most of
-# the level differences across neighborhoods.
-y <- train_df$zorf - train_df$zip_mean
+my_prior <- c(
+  prior(normal(0, 1),    class = 'b', coef = 'time_index'),
+  prior(normal(0, 1),    class = 'b', coef = 'sin_season'),
+  prior(normal(0, 1),    class = 'b', coef = 'cos_season'),
+  prior(normal(0, 1),    class = 'b', coef = 'HasUniversity'),
 
-X <- cbind(
-  intercept  = 1,
-  time_index = train_df$time_index,
-  sin_season = train_df$sin_season,
-  cos_season = train_df$cos_season
+  prior(normal(5, 1),    class = 'Intercept'),
+
+  prior(exponential(1),  class = 'sd', group = 'Neighborhood'),
+  prior(exponential(1),  class = 'sd', group = 'Neighborhood:ZipCode')
 )
-
-n <- nrow(X)
-p <- ncol(X)
-
-cat('X dimensions:', n, 'x', p, '\n')
-cat('y mean after zip adjustment:', mean(y), '\n')
-cat('y sd after zip adjustment:',  sd(y),   '\n')
 ```
 
+### fitting the model
 
 ```{r}
-# Priors for w
-# Zero prior mean for all three weights:
-# - Intercept: should be near zero after zip adjustment
-# - sin/cos: no seasonality is a reasonable null assumption,
-#   the data will push these away from zero if seasonality exists
-# Prior variance of 10 is relatively uninformative —
-# we're not strongly penalizing large seasonal effects
-prior_w     <- matrix(rep(0, p), ncol = 1)
-prior_Sigma <- diag(p) * 10
-
-# Priors for sigma2
-# Alpha = 3 is a weakly informative shape
-# Beta anchored to empirical variance of adjusted y
-# so the prior is on the right scale for your data
-prior_alpha <- 3
-prior_beta  <- var(y) * 2
-```
-
-```{r}
-# Storage and initialization
-n_samples <- 10000
-gibbs_samples_w      <- matrix(0, nrow = n_samples, ncol = p)
-gibbs_samples_sigma2 <- matrix(0, nrow = n_samples, ncol = 1)
-
-# Initialize at sensible starting values
-w_tilde      <- matrix(0, nrow = p, ncol = 1)
-sigma2_tilde <- var(y)
-
-
-for (i in 1:n_samples) {
-  # Conditional posterior for w given sigma2
-  V       <- solve((1/sigma2_tilde) * t(X) %*% X + solve(prior_Sigma))
-  M       <- V %*% ((1/sigma2_tilde) * t(X) %*% y + 
-                    solve(prior_Sigma) %*% prior_w)
-  L       <- chol(V)
-  w_tilde <- M + t(L) %*% rnorm(p)
-
-  # Conditional posterior for sigma2 given w
-  A            <- prior_alpha + n / 2
-  B            <- prior_beta + 0.5 * sum((y - X %*% w_tilde)^2)
-  
-  # Sample from inverse gamma using base R only
-  sigma2_tilde <- 1 / rgamma(1, shape = A, rate = B)
-
-  gibbs_samples_w[i, ]      <- w_tilde
-  gibbs_samples_sigma2[i, ] <- sigma2_tilde
-}
-
-cat('Posterior weight means:\n')
-print(colMeans(gibbs_samples_w))
-cat('Posterior sigma2 mean:\n')
-print(mean(gibbs_samples_sigma2))
-```
-
-```{r}
-# Convergence diagnostics
-# Always check these before trusting the posterior samples.
-# The trace plots should look like white noise with no drift.
-# The ACF should drop to near zero quickly.
-# If either looks bad, you may need more samples or thinning.
-par(mfrow = c(2, 3))
-plot(gibbs_samples_w[,1],      type = 'l', main = 'Trace: Intercept')
-plot(gibbs_samples_w[,2],      type = 'l', main = 'Trace: sin')
-plot(gibbs_samples_w[,3],      type = 'l', main = 'Trace: cos')
-plot(gibbs_samples_sigma2,     type = 'l', main = 'Trace: sigma2')
-acf(gibbs_samples_w[,2],                   main = 'ACF: sin')
-acf(gibbs_samples_sigma2,                  main = 'ACF: sigma2')
-par(mfrow = c(1, 1))
-```
-
-### Evaluation
-```{r}
-# Posterior predictive for test set
-# Build the test X matrix the same way as training
-y_test <- test_df$zorf - test_df$zip_mean
-X_test <- cbind(
-  intercept  = 1,
-  time_index = test_df$time_index,
-  sin_season = test_df$sin_season,
-  cos_season = test_df$cos_season
+fit <- brm(
+  zorf ~ time_index + sin_season + cos_season +
+         HasUniversity + (1 | Neighborhood/ZipCode),
+  data    = train_df,
+  family  = Gamma(link = 'log'),
+  prior   = my_prior,
+  chains  = 4,
+  iter    = 2500,
+  warmup  = 500,
+  cores   = 4,
+  seed    = 42,
+  control = list(adapt_delta = 0.95)
 )
-
-n_test          <- nrow(X_test)
-post_pred_means <- numeric(n_test)
-post_pred_lower <- numeric(n_test)
-post_pred_upper <- numeric(n_test)
-
-for (j in 1:n_test) {
-  # For each test observation, generate a full
-  # posterior predictive distribution by plugging
-  # each posterior draw of w and sigma2 into the likelihood
-  preds <- rnorm(
-    n    = n_samples,
-    mean = gibbs_samples_w %*% X_test[j, ],
-    sd   = sqrt(gibbs_samples_sigma2)
-  )
-  post_pred_means[j] <- mean(preds)
-  # 90% credible interval — the Bayesian analog of a
-  # confidence interval, directly interpretable as
-  # "we believe true rent falls in this range with 90% probability"
-  post_pred_lower[j] <- quantile(preds, 0.05)
-  post_pred_upper[j] <- quantile(preds, 0.95)
-}
-
-# Add zip mean back to get predictions on original rent scale
-final_preds <- post_pred_means + test_df$zip_mean
-final_lower <- post_pred_lower  + test_df$zip_mean
-final_upper <- post_pred_upper  + test_df$zip_mean
-
-# Evaluation
-rmse <- sqrt(mean((final_preds - test_df$zorf)^2))
-coverage <- mean(test_df$zorf >= final_lower & 
-                 test_df$zorf <= final_upper)
-
-cat('Test RMSE:', rmse, '\n')
-cat('90% credible interval coverage:', coverage, '\n')
 ```
 
+## Evaluation
 ```{r}
-cat('Posterior sigma2 mean:', mean(gibbs_samples_sigma2), '\n')
-cat('Posterior sigma2 sd:',   sd(gibbs_samples_sigma2),   '\n')
-cat('Posterior sigma sd (sqrt):', mean(sqrt(gibbs_samples_sigma2)), '\n')
-
-cat('y (zip-adjusted) sd:',  sd(y), '\n')
-cat('y (original) sd:',      sd(train_df$zorf), '\n')
-cat('Residual sd (OLS):',    
-    sd(y - X %*% colMeans(gibbs_samples_w)), '\n')
-```
-```{r}
-cat('final_lower range:', range(final_lower), '\n')
-cat('final_upper range:', range(final_upper), '\n')
-cat('CI width (mean):',   mean(final_upper - final_lower), '\n')
-cat('zorf range:',        range(test_df$zorf), '\n')
-```
-```{r}
-cat('time_index range:', range(train_df$time_index), '\n')
-cat('time_index mean:',  mean(train_df$time_index),  '\n')
+summary(fit)
 ```
 
 
 
 ```{r}
-# Choose your zip code of interest
-target_zip <- "02115"  # example — Fenway/Northeastern area
-
-# Check if this zip code was in training data
-if (!target_zip %in% zip_means$ZipCode) {
-  cat('Warning: zip code not seen in training, using overall mean\n')
-  zip_baseline <- overall_mean
-} else {
-  zip_baseline <- zip_means$zip_mean[zip_means$ZipCode == target_zip]
-}
-cat('Zip baseline rent:', zip_baseline, '\n')
+plot(fit)
 ```
+
+
+```{r}
+bayes_R2(fit)
+```
+
+
+```{r}
+post_preds_train <- posterior_predict(fit)
+preds_train_mean <- colMeans(post_preds_train)
+```
+
+
+```{r}
+plot(preds_train_mean, train_df$zorf,
+     main = "Posterior Pred Means vs. Actual zorf (Train)",
+     xlab = "Predicted zorf", ylab = "Actual zorf")
+abline(0, 1, col = 'red', lwd = 2)   # perfect prediction line
+```
+
+```{r}
+cor(preds_train_mean, train_df$zorf)
+```
+
+
+```{r}
+post_preds_test <- posterior_predict(
+  fit,
+  newdata          = test_df,
+  allow_new_levels = TRUE,
+  sample_new_levels = "gaussian"   # draws new group effects from the estimated
+)                                  # population distribution (Σ_ψ) rather than
+                                   # just using the fixed-effect mean
+```
+
+```{r}
+preds_test_mean <- colMeans(post_preds_test)
+cor(preds_test_mean, test_df$zorf)
+```
+
+```{r}
+plot(preds_test_mean, test_df$zorf,
+     main = "Posterior Pred Means vs. Actual zorf (Test)",
+     xlab = "Predicted zorf", ylab = "Actual zorf")
+abline(0, 1, col = 'red', lwd = 2)
+```
+
+
+```{r}
+rmse_test <- sqrt(mean((preds_test_mean - test_df$zorf)^2))
+rmse_test
+```
+
+
 
