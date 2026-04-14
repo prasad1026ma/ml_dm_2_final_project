@@ -4,11 +4,24 @@ from datetime import datetime
 
 
 class MinMaxScaler:
+    """
+    Performs sklearns min-max scalar manually
+    """
     def fit(self, data):
+        """
+        Finds the max and min of the data
+        :param data: array of inputted values
+        :return:
+        """
         self.min = np.min(data)
         self.max = np.max(data)
         return self
     def transform(self, data):
+        """
+
+        :param data:
+        :return:
+        """
         if self.max == self.min:
             return np.zeros_like(data, dtype=float)
         return (data - self.min) / (self.max - self.min)
@@ -62,7 +75,6 @@ def create_seasonal_features(date_cols):
     seasonal_features = []
     for date_col in date_cols:
         month = extract_month_from_date_string(date_col)
-
         if month is None:
             continue
 
@@ -85,11 +97,9 @@ def create_september_tracker(date_cols, sigma=1.5):
     intensities = []
     for date_col in date_cols:
         month = extract_month_from_date_string(date_col)
-
         if month is None:
             intensities.append(0.0)
             continue
-
         val = np.exp(-0.5 * ((month - 9) / sigma) ** 2)
         intensities.append(val)
 

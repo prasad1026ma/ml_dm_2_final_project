@@ -3,12 +3,11 @@ import numpy as np
 from manual_neural_network import ManualNN
 from cnn_utilities import(load_data, get_date_columns, MinMaxScaler, create_september_tracker,
                     create_seasonal_features, calculate_volatility, calculate_rate_of_change)
-
+''
 SEQ_LEN = 12
 
 def create_sequences(data, seq_len=12):
     X, y = [], []
-
     for i in range(seq_len, len(data)):
         seq = data[i - seq_len:i]
         price_series = data[:, 0]
@@ -128,7 +127,7 @@ def predict_zip(df, date_cols, model, zip_code):
 
 def main():
     print("Loading data...")
-    df = load_data('boston_cleaned_data.csv')
+    df = load_data('../boston_cleaned_data.csv')
     date_cols = get_date_columns(df)
     print(f"Loaded {len(df)} regions\n")
 

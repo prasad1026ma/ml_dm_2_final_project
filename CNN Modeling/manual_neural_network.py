@@ -1,9 +1,24 @@
 import numpy as np
 def relu(x):
+    """
+    compute ReLU for a given x
+    :param x:
+    :return:
+    """
     return np.maximum(0, x)
 def relu_grad(x):
+    """
+    compute derivative of ReLU for a given x
+    :param x:
+    :return:
+    """
     return (x > 0).astype(float)
 def tanh_grad(x):
+    """
+    compute the derivative of tanh based on the given x
+    :param x:
+    :return:
+    """
     return 1 - np.tanh(x) ** 2
 def sigmoid(x):
     return 1 / (1 + np.exp(-np.clip(x, -500, 500)))

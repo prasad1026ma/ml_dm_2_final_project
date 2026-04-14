@@ -26,3 +26,33 @@ ML is particularly suited for this problem because Boston's rental market is sha
 ### 2. CNN
   A CNN-based classifier that takes a zip code and its historical rental trend as well as some other factors as input and outputs a binary recommendation (good time to rent or not) based on whether current prices are favorable relative to the area's recent trend. This model is designed to give renters a simple, actionable signal rather than requiring them to interpret raw price data themselves.
 
+#### Code
+- `cnn_utilities.py`: 
+  - `MinMaxScaler`: 
+  - `load_data`: 
+  - `get_date_columns`:
+  - `scale_prices`:
+  - `calculate_volatility`:
+  - `calculate_rate_of_change`:
+  - `extract_month_from_date_string`:
+  - `create_seasonal_features`:
+  - `create_september_tracker`
+- `manual_neural_network.py`: 
+  - `relu`/ `relu_grad`:
+  - `tanh_grad`:
+  - `sigmoid`,`sigmoid_grad`:
+  - `binary_crossentropy`:
+  - `Manual_NN`:
+    - `forward`:
+    - `backward`:
+    - `train`:
+    - `evaluate`:
+    - `predict`:
+- `cnn_predictions.py`: 
+  - `create_sequences`:
+  - `process_data`:
+  - `model_eval`:
+  - `prepare_training_data`:
+  - `build_features`:
+  - `predict_zip`:
+  - `main`:
