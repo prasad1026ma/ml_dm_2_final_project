@@ -9,10 +9,6 @@ warnings.filterwarnings('ignore')
 def load_and_prepare_zori(filepath):
     df = pd.read_csv(filepath)
     date_cols = [col for col in df.columns if isinstance(col, str) and col.count('-') == 2]
-
-    if not date_cols:
-        raise ValueError("No date columns found. Check that column names are in YYYY-MM-DD format.")
-
     metadata_cols = [col for col in df.columns if col not in date_cols]
     zori_long = df[metadata_cols + date_cols].melt(
         id_vars=metadata_cols,
@@ -120,12 +116,3 @@ def generate_zori_forecasts(input_filepath, output_filepath=None):
 
     forecast_df.to_csv(output_filepath, index=False)
     return forecast_df
-
-if __name__ == "__main__":
-    input_file = "../boston_cleaned_data.csv"
-    output_file = "zori_forecasts.csv"
-
-    forecasts = generate_zori_forecasts(input_file, output_file)
-    print("Sample output (first 5 rows):")
-    print(forecasts[['ZipCode', 'City', 'ZORI_forecast_1m',
-                     'ZORI_forecast_3m']].head())

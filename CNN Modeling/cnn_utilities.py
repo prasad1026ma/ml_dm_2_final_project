@@ -76,17 +76,19 @@ def create_seasonal_features(date_cols):
     for date_col in date_cols:
         month = extract_month_from_date_string(date_col)
         if month is None:
-            continue
-
-        month_sin = np.sin(2 * np.pi * month / 12)
-        month_cos = np.cos(2 * np.pi * month / 12)
-
-        if month in [6, 7, 8]:
-            season_flag = 1.0
-        elif month in [12, 1, 2]:
-            season_flag = -1.0
-        else:
+            month_sin = 0.0
+            month_cos = 0.0
             season_flag = 0.0
+        else:
+            month_sin = np.sin(2 * np.pi * month / 12)
+            month_cos = np.cos(2 * np.pi * month / 12)
+
+            if month in [6, 7, 8]:
+                season_flag = 1.0
+            elif month in [12, 1, 2]:
+                season_flag = -1.0
+            else:
+                season_flag = 0.0
 
         seasonal_features.append([month_sin, month_cos, season_flag])
 
@@ -104,3 +106,10 @@ def create_september_tracker(date_cols, sigma=1.5):
         intensities.append(val)
 
     return np.array(intensities)
+
+def integrated_dfs(df):
+    prediction_df = pd.read_csv('zori_forecasts.csv')
+    prediction_df = prediction_df[['ZipCode', 'ZORI_forecast_1m', 'ZORI_forecast_3m']]
+    prediction_df['ZipCode'] = prediction_df['ZipCode'].astype(str).str.zfill(5)
+    df = df.merge(prediction_df, on="ZipCode", how="left")
+    return df
