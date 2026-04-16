@@ -324,6 +324,37 @@ cat('test date range:',  as.character(min(test_df$date)),
 ```
 
 ## Designing The Bayesian model
+### Choosing the likelihood
+```{r}
+y <- long_df$zorf
+shape_hat <- mean(y)^2 / var(y)
+rate_hat  <- mean(y) / var(y)
+
+# Draw histogram on density scale
+hist(
+  y,
+  breaks = seq(1400, 5000, by = 200),
+  probability = TRUE,
+  col = "lightgray",
+  border = "gray50",
+  main = "Distribution of ZORI with Fitted Gamma Density",
+  xlab = "ZORI",
+  ylab = "Density",
+  xlim = c(1400, 5000)
+)
+
+# Overlay fitted Gamma density
+curve(
+  dgamma(x, shape = shape_hat, rate = rate_hat),
+  from = 1400,
+  to = 5000,
+  add = TRUE,
+  lwd = 2
+)
+```
+
+
+
 I have conviction around the fact that the base rent is positive, probably around 2000K.
 ```{r}
 # Gamma model priors
@@ -345,6 +376,15 @@ gamma_priors <- c(
 ```
 
 ```{r}
+options(mc.cores = parallel::detectCores())
+```
+
+```{r}
+Sys.setenv(STAN_NUM_THREADS = 2)
+```
+
+
+```{r}
 # Fit the Gamma mixed model
 gamma_brm <- brm(
   formula = zorf ~ cos_season + HasUniversity +
@@ -353,11 +393,13 @@ gamma_brm <- brm(
   family = Gamma(link = "log"),
   data = train_df,
   chains = 4,
-  cores = getOption("mc.cores", 1),
+  cores = 4,
+  threads = threading(2),
   iter = 4000,
-  warmup = 180,
+  warmup = 1000,
   thin = 1,
-  prior = gamma_priors
+  prior = gamma_priors,
+  control = list(adapt_delta = 0.99, max_treedepth = 15),
 )
 ```
 
