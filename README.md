@@ -67,5 +67,5 @@ whether current market conditions represent a favorable time to rent in a given 
   - **Feature Engineering**: computes volatility, September intensity, and sin/cos seasonality
   - **EDA**: zip-level and neighborhood-level rent trend visualizations
   - **Model Definition**: Gamma-log formula with prior specification
-  - **Model Fitting**: 80/20 train/test split, 4 chains, 2500 iterations via HMC
+  - **Model Fitting**: 80/20 train/test split, 4 chains, 2000 iterations via BRMS, adapt_delta=0.99 & max_tree=15
   - **Evaluation**: RMSE, Bayes $R^2$, posterior predictive checks
