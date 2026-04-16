@@ -1,34 +1,47 @@
-import numpy as np
+
 import pandas as pd
 from datetime import datetime
+import matplotlib.pyplot as plt
+import numpy as np
+import pickle
 
 
-class MinMaxScaler:
+
+class StandardScaler:
     """
-    Performs sklearns min-max scalar manually
+    Manual implementation of sklearn's StandardScaler.
+    Transforms data to have mean = 0 and std = 1.
     """
+
     def fit(self, data):
         """
-        Finds the max and min of the data
-        :param data: array of inputted values
-        :return:
+        Compute mean and standard deviation.
+
+        :param data: array-like input
+        :return: self
         """
-        self.min = np.min(data)
-        self.max = np.max(data)
+        self.mean = np.mean(data)
+        self.std = np.std(data)
         return self
+
     def transform(self, data):
         """
+        Apply standardization: (x - mean) / std
 
-        :param data:
-        :return:
+        :param data: np.array input
+        :return: standardized data
         """
-        if self.max == self.min:
+        if self.std == 0:
+            # Avoid division by zero → all values identical
             return np.zeros_like(data, dtype=float)
-        return (data - self.min) / (self.max - self.min)
+
+        return (data - self.mean) / self.std
 
     def fit_transform(self, data):
+        """
+        Fit and transform in one step
+        """
         return self.fit(data).transform(data)
-
 
 def load_data(filepath):
     df = pd.read_csv(filepath, dtype={'ZipCode': str})
@@ -40,10 +53,6 @@ def get_date_columns(df):
                  'Neighborhood', 'HasUniversity']
     date_cols = [c for c in df.columns if c not in meta_cols]
     return date_cols
-
-def scale_prices(prices):
-    scaler = MinMaxScaler()
-    return scaler.fit_transform(prices), scaler
 
 def calculate_volatility(prices, window=6):
     volatility = np.zeros_like(prices, dtype=float)
@@ -113,3 +122,39 @@ def integrated_dfs(df):
     prediction_df['ZipCode'] = prediction_df['ZipCode'].astype(str).str.zfill(5)
     df = df.merge(prediction_df, on="ZipCode", how="left")
     return df
+
+
+def plot_training_history(train_losses, val_losses):
+    """
+    Plot training and validation loss over epochs
+
+    :param train_losses: list of training losses
+    :param val_losses: list of validation losses
+    """
+    epochs = range(1, len(train_losses) + 1)
+
+    plt.figure()
+    plt.plot(epochs, train_losses, label="Training Loss")
+    plt.plot(epochs, val_losses, label="Validation Loss")
+
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training vs Validation Loss")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("training_loss.png")
+    plt.close()
+
+import pickle
+
+def save_model(model, filepath='cnn_model.pkl'):
+    """Save manual CNN model using pickle"""
+    with open(filepath, 'wb') as f:
+        pickle.dump(model, f)
+    print(f"Model saved to {filepath}")
+
+def load_model(model_class, filepath='cnn_model.pkl'):
+    """Load manual CNN model from pickle"""
+    with open(filepath, 'rb') as f:
+        model = pickle.load(f)
+    return model
