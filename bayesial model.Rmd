@@ -5,6 +5,8 @@ date: "2026-04-09"
 output: pdf_document
 ---
 
+
+
 ```{r setup, include=FALSE}
 install.packages(c('tidyr', 'dplyr', 'brms', 'ggplot2'))
 library(tidyr)
@@ -26,6 +28,40 @@ meta_cols <- c('RegionID', 'SizeRank', 'ZipCode', 'RegionType',
 date_cols <- setdiff(colnames(df), meta_cols)
 ```
 
+```{r}
+test_group_specificity <- function(data, response, effect, groups) {
+  results <- list()
+  
+  for (g in groups) {
+    # Base model: control for group + effect
+    base_formula <- as.formula(
+      paste(response, "~", g, "+", effect)
+    )
+    
+    # Interaction model: allow effect to vary by group
+    interaction_formula <- as.formula(
+      paste(response, "~", g, "+", effect, "*", g)
+    )
+    
+    model_base <- lm(base_formula, data = data)
+    model_interaction <- lm(interaction_formula, data = data)
+    
+    cmp <- anova(model_base, model_interaction)
+    
+    results[[g]] <- data.frame(
+      group = g,
+      df_added = cmp$Df[2],
+      rss_drop = cmp$RSS[1] - cmp$RSS[2],
+      f_value = cmp$F[2],
+      p_value = cmp$`Pr(>F)`[2]
+    )
+  }
+  
+  do.call(rbind, results)
+}
+```
+
+
 ## Converting data to long form
 ```{r}
 long_df <- df %>%
@@ -40,82 +76,237 @@ long_df <- df %>%
   )
 ```
 
-## EDA
+## EDA/ Feature Engineering
 
-### Test 1: How do different zipcode rental prices change over time?
-```{r}
-long_df %>%
-  group_by(ZipCode) %>%
-  summarise(mean_zorf = mean(zorf)) %>%
-  arrange(desc(mean_zorf))
-```
-
-```{r}
-long_df %>%
-  ggplot(aes(x = date, y = zorf, color = ZipCode)) +
-  geom_line() +
-  theme_minimal() +
-  labs(title = 'ZORF over time by Zip Code')
-```
-Lines follow the same patterns over time (all dip during covid) and looking at seasonality, seasonal and market trends are shared across zip codes.
-However the baseline in which they operate are drastically different.
-
-
-```{r}
-long_df %>%
-  ggplot(aes(x = reorder(ZipCode, zorf, median), y = zorf)) +
-  geom_boxplot() +
-  coord_flip() +
-  theme_minimal() +
-  labs(title = 'ZORF distribution by Zip Code',
-       x = 'Zip Code', y = 'ZORF')
-```
-
-
-```{r}
-anova_result <- aov(zorf ~ ZipCode, data = long_df)
-summary(anova_result)
-```
-One-way ANOVA tests whether the variation in ZORF between zip codes is large enough relative to the variation within zip codes to be considered statistically significant
-With a result of (F=146.7, p<2e-16) means the zip code differences are overwhelmingly real and not due to chance, justifying the use of zip-level random effects in the model.
-
-
-### Introducing Seasonality
-
+### Do weather patterns (seasons) impact ZORF?
 ```{r}
 long_df <- long_df %>%
   mutate(
-    time_index = as.numeric(date - min(date)) / 365,
     month_num  = as.numeric(format(date, '%m')),
     sin_season = sin(2 * pi * month_num / 12),
     cos_season = cos(2 * pi * month_num / 12)
   )
 ```
 
-## Building the model
+```{r}
+#anova checking the significance of including seasonality vs. without
+lm_without <- lm(zorf ~ time_index, data = long_df)
+
+lm_with <- lm(zorf ~ time_index + sin_season + cos_season, data = long_df)
+
+anova(lm_without, lm_with)
+```
+```{r}
+cor(long_df$sin_season, long_df$zorf, use = "complete.obs")
+cor(long_df$cos_season, long_df$zorf, use = "complete.obs")
+```
+**Data Decision:** Since the joint F-test is significant but individual correlations are near zero, the seasonal terms matter only as a combined pattern, not as separate effects.
+
+Is it different by group?
+```{r}
+groups <- c("HasUniversity", "Neighborhood", "ZipCode")
+
+test_group_specificity(
+  data = long_df,
+  response = "zorf",
+  effect = "sin_season + cos_season",
+  groups = groups
+)
+```
+The smooth sinusoidal seasonality (sin/cos) is globally consistent across locations, but it does not capture the true leasing cycle pattern.
+
+
+### Does the academic calendar impact ZORF? Is it global or zipcode level?
+To understand how best to model the “September 1” lease cycle in Boston, we first tested whether rent varies systematically by month without imposing any specific seasonal shape. We fit a linear regression model where zorf is explained by month categories.
+```{r}
+long_df$month_factor <- factor(long_df$month_num)
+
+lm(zorf ~ month_factor, data = long_df)
+```
+The intercept represents average rent in January. Each month_factor coefficient tells you how much higher or lower that month is compared to January.By month shows prices rise from spring to a summer peak (June–July) and then decline after September, confirming a pre-9/1 demand cycle.
+Given this, to model the leasing cycle effect, we construct a piecewise function to mimic that cycle.
 
 ```{r}
-# Train/test split
-split_idx <- floor(nrow(long_df) * 0.8)
-train_df  <- long_df %>% slice(1:split_idx)
-test_df   <- long_df %>% slice((split_idx + 1):nrow(long_df))
+create_lease_cycle <- function(months) {
+  sapply(months, function(m) {
+    if (is.na(m)) return(0)
+
+    # Jan-Apr: low
+    if (m <= 4) return(0)
+
+    # May-Jul: ramp up to peak
+    if (m >= 5 && m <= 7) return((m - 4) / 3)
+
+    # Aug-Sep: decline from peak
+    if (m >= 8 && m <= 9) return(1 - 0.35 * (m - 7))
+
+    # Oct-Dec: low again
+    return(0)
+  })
+}
+
+long_df$lease_cycle <- create_lease_cycle(long_df$month_num)
+```
+
+```{r}
+groups <- c("HasUniversity", "Neighborhood", "ZipCode")
+
+test_group_specificity(
+  data = long_df,
+  response = "zorf",
+  effect = "lease_cycle",
+  groups = groups
+)
+```
+There are no significant differences in how ZORF follows the lease-cycle pattern across locations, meaning the seasonal effect is global rather than group-specific.
+
+### Are there significant differences in long-term trend over time? Are some zips appreciating faster than others over time?
+```{r}
+summary(lm(zorf ~ time_index, data = long_df))
+```
+Time is statistically signficant, which makes sense given inflation on rent prices over time. 
+
+```{r}
+groups <- c("HasUniversity", "Neighborhood", "ZipCode")
+
+test_group_specificity(
+  data = long_df,
+  response = "zorf",
+  effect = "time_index",
+  groups = groups
+)
+```
+The rate of appreciation over time is significantly different by zip code and by neighborhood, but is consistent between university and non-university areas (p = 0.65).
+
+```{r}
+zip_trends <- long_df %>%
+  group_by(ZipCode) %>%
+  do(tidy(lm(zorf ~ time_index, data = .))) %>%
+  filter(term == "time_index") %>%
+  select(ZipCode, estimate, std.error, p.value) %>%
+  arrange(desc(estimate))
+```
+
+```{r}
+ggplot(long_df, aes(x = time_index, y = zorf, 
+                    group = ZipCode, color = Neighborhood)) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.7) +
+  theme_minimal() +
+  labs(title = "Zip-level trends over time (colored by Neighborhood)", 
+       x = "Time Index", y = "ZORF")
+```
+Looking at trends in ZORF over time though, most of the lines follow a similar slope, just starting intercepts are different. There are two outliers.
+
+
+So, next testing whether neighborhood labels explain a statistically significant portion of the variation in zip-level time slopes.
+```{r}
+# get zip-level slopes
+zip_slopes <- long_df %>%
+  group_by(Neighborhood, ZipCode) %>%
+  do(tidy(lm(zorf ~ time_index, data = .))) %>%
+  filter(term == "time_index") %>%
+  select(Neighborhood, ZipCode, estimate)
+# Null: zip slopes are just randomly distributed around a global mean
+m_null <- lm(estimate ~ 1, data = zip_slopes)
+
+# Alternative: zip slopes vary systematically by neighborhood
+m_neighborhood <- lm(estimate ~ Neighborhood, data = zip_slopes)
+
+anova(m_null, m_neighborhood)
+```
+Yes, knowing which neighborhood a zip code belongs to tells you something meaningful about how fast that zip's rents are appreciating over time.
+
+### Volatility
+```{r}
+calculate_volatility <- function(data, window = 6) {
+  data %>%
+    arrange(ZipCode, date) %>%
+    group_by(ZipCode) %>%
+    mutate(volatility = zoo::rollapply(
+      zorf, 
+      width   = window, 
+      FUN     = sd, 
+      fill    = NA, 
+      align   = "right"   # only looks backwards
+    )) %>%
+    ungroup()
+}
+
+long_df <- calculate_volatility(long_df)
+```
+
+```{r}
+# is it significant at all?
+summary(lm(zorf ~ volatility, data = long_df))
+```
+
+
+```{r}
+# is it global or group specific?
+test_group_specificity(long_df %>% filter(!is.na(volatility)),
+                       response = "zorf",
+                       effect   = "volatility",
+                       groups   = c("HasUniversity", "Neighborhood", "ZipCode"))
+```
+
+
+
+```{r}
+zip_volatility_slopes <- long_df %>%
+  filter(!is.na(volatility)) %>%
+  group_by(Neighborhood, ZipCode) %>%
+  do(tidy(lm(zorf ~ volatility, data = .))) %>%
+  filter(term == "volatility") %>%
+  select(Neighborhood, ZipCode, estimate) %>%
+  left_join(distinct(long_df, ZipCode, HasUniversity), by = "ZipCode")
+
+# does neighborhood explain zip-level slope variance?
+anova(
+  lm(estimate ~ 1,            data = zip_volatility_slopes),
+  lm(estimate ~ Neighborhood, data = zip_volatility_slopes)
+)
+```
+Neighborhood explains a statistically significant portion of the variation in how strongly volatility affects zip-level rents (F=2.83, p=0.035), justifying volatility as a neighborhood-level random slope rather than a global fixed effect.
+
+
+**Does neighborhood explain additional slope variance beyond what HasUniversity already captures?** 
+```{r}
+anova(
+  lm(estimate ~ HasUniversity,                data = zip_volatility_slopes),
+  lm(estimate ~ HasUniversity + Neighborhood, data = zip_volatility_slopes)
+)
+```
+So neighborhood does not significantly explain additional variance beyond what HasUniversity already captures (p=0.076)
+
+
+
+
+## Train - Test Split
+```{r}
+cutoff_date <- quantile(long_df$date, 0.8)
+
+train_df <- long_df %>% filter(date <= cutoff_date)
+test_df  <- long_df %>% filter(date >  cutoff_date)
+
 cat('nrow train_df:', nrow(train_df), '\n')
 cat('nrow test_df:',  nrow(test_df),  '\n')
+cat('train date range:', as.character(min(train_df$date)), 
+    'to', as.character(max(train_df$date)), '\n')
+cat('test date range:',  as.character(min(test_df$date)),  
+    'to', as.character(max(test_df$date)),  '\n')
 ```
+
+
+
+## Designing The Bayesian model
+- Sine + Cosine interaction level is a global variable.
+- lease_cycle is a global variable
+- Knowing which neighborhood a zip code belongs to tells you something meaningful about how fast that zip's rents are appreciating over time.
+- Has_university is a good indicator of volatility
 
 ```{r}
-# Do higher-rent zips have higher variance?
-train_df %>%
-  group_by(ZipCode) %>%
-  summarise(mean_zorf = mean(zorf), sd_zorf = sd(zorf)) %>%
-  ggplot(aes(x = mean_zorf, y = sd_zorf)) +
-  geom_point() +
-  geom_smooth(method = 'lm', se = FALSE) +
-  theme_minimal() +
-  labs(title = 'Mean vs SD of ZORF by Zip Code',
-       x = 'Mean ZORF', y = 'SD ZORF')
+colnames(long_df)
 ```
-
 
 ```{r}
 # initial priors
@@ -127,35 +318,82 @@ default_prior(zorf ~ time_index + sin_season + cos_season +
 
 ```{r}
 my_prior <- c(
-  prior(normal(0, 1),    class = 'b', coef = 'time_index'),
-  prior(normal(0, 1),    class = 'b', coef = 'sin_season'),
-  prior(normal(0, 1),    class = 'b', coef = 'cos_season'),
-  prior(normal(0, 1),    class = 'b', coef = 'HasUniversity'),
-
-  prior(normal(5, 1),    class = 'Intercept'),
-
-  prior(exponential(1),  class = 'sd', group = 'Neighborhood'),
-  prior(exponential(1),  class = 'sd', group = 'Neighborhood:ZipCode')
+  prior(normal(0, 1),   class = 'b', coef = 'time_index'),
+  prior(normal(0, 1),   class = 'b', coef = 'sin_season'),
+  prior(normal(0, 1),   class = 'b', coef = 'cos_season'),
+  prior(normal(0, 1),   class = 'b', coef = 'HasUniversity'),
+  prior(normal(7.5, 0.5), class = 'Intercept'),
+  prior(gamma(2, 0.2), class = 'shape'),
+  prior(exponential(1), class = 'sd', group = 'ZipCode')
 )
 ```
 
-### fitting the model
 
+
+### fitting the model
 ```{r}
 fit <- brm(
-  zorf ~ time_index + sin_season + cos_season +
-         HasUniversity + (1 | Neighborhood/ZipCode),
+  zorf ~ time_index + sin_season + cos_season + 
+         HasUniversity + (1 | ZipCode),
   data    = train_df,
   family  = Gamma(link = 'log'),
   prior   = my_prior,
   chains  = 4,
-  iter    = 2500,
-  warmup  = 500,
+  iter    = 4000,
+  warmup  = 1000,
   cores   = 4,
   seed    = 42,
-  control = list(adapt_delta = 0.95)
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
 )
 ```
+```{r}
+fit_lognormal <- brm(
+  zorf ~ time_index + sin_season + cos_season +
+         HasUniversity + (1 | ZipCode),
+  data    = train_df,
+  family  = lognormal(),
+  prior   = c(
+    prior(normal(0, 1), class = "b"),
+    prior(normal(7.5, 0.5), class = "Intercept"),
+    prior(exponential(1), class = "sd", group = "ZipCode"),
+    prior(exponential(1), class = "sigma")
+  ),
+  chains  = 4,
+  iter    = 4000,
+  warmup  = 1000,
+  cores   = 4,
+  seed    = 42,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+```
+
+```{r}
+summary(fit_lognormal)
+```
+
+```{r}
+bayes_R2(fit_lognormal)
+```
+
+```{r}
+pred_test2 <- posterior_predict(
+  fit_lognormal,
+  newdata          = test_df,
+  allow_new_levels = TRUE,
+  sample_new_levels = "gaussian"
+)  
+preds_test_mean <- colMeans(pred_test2)
+cor(preds_test_mean, test_df$zorf)
+rmse_test <- sqrt(mean((preds_test_mean - test_df$zorf)^2))
+rmse_test
+# Check 90% CI coverage
+lower <- apply(pred_test2, 2, quantile, 0.05)
+upper <- apply(pred_test2, 2, quantile, 0.95)
+coverage <- mean(test_df$zorf >= lower & test_df$zorf <= upper)
+cat("90% CI coverage:", coverage, "\n")
+```
+
+
 
 ## Evaluation
 ```{r}
@@ -220,5 +458,516 @@ rmse_test <- sqrt(mean((preds_test_mean - test_df$zorf)^2))
 rmse_test
 ```
 
+```{r}
+preds_test_mean <- colMeans(post_preds_test)
+cor(preds_test_mean, test_df$zorf)
+rmse_test <- sqrt(mean((preds_test_mean - test_df$zorf)^2))
+rmse_test
+# Check 90% CI coverage
+lower <- apply(post_preds_test, 2, quantile, 0.05)
+upper <- apply(post_preds_test, 2, quantile, 0.95)
+coverage <- mean(test_df$zorf >= lower & test_df$zorf <= upper)
+cat("90% CI coverage:", coverage, "\n")
+```
 
+### Testing how adding other enginered features impacts results 
+```{r}
+my_prior <- c(
+  prior(normal(0, 1),   class = 'b', coef = 'time_index'),
+  prior(normal(0, 1),   class = 'b', coef = 'sin_season'),
+  prior(normal(0, 1),   class = 'b', coef = 'cos_season'),
+  prior(normal(0, 1),   class = 'b', coef = 'HasUniversity'),
+  prior(normal(7.5, 0.5), class = 'Intercept'),
+  prior(gamma(2, 0.1),     class = 'shape'),
+  prior(exponential(1), class = 'sd', group = 'ZipCode'),
+  prior(normal(0, 1), class = 'b', coef = 'sept_intensity')
+)
+```
+
+```{r}
+fit2 <- brm(
+  zorf ~ time_index + sin_season + cos_season + 
+       HasUniversity + sept_intensity + (1 | ZipCode),
+  data    = train_df,
+  family  = Gamma(link = 'log'),
+  prior   = my_prior,
+  chains  = 4,
+  iter    = 4000,
+  warmup  = 1000,
+  cores   = 4,
+  seed    = 42,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+```
+
+```{r}
+summary(fit2)
+```
+
+
+```{r}
+plot(fit2)
+```
+
+
+```{r}
+bayes_R2(fit2)
+```
+
+
+```{r}
+pred_test2 <- posterior_predict(
+  fit,
+  newdata          = test_df,
+  allow_new_levels = TRUE,
+  sample_new_levels = "gaussian"   # draws new group effects from the estimated
+)    
+```
+
+
+```{r}
+pred_test2 <- posterior_predict(
+  fit2,
+  newdata          = test_df,
+  allow_new_levels = TRUE,
+  sample_new_levels = "gaussian"   # draws new group effects from the estimated
+)  
+preds_test_mean <- colMeans(pred_test2)
+cor(preds_test_mean, test_df$zorf)
+rmse_test <- sqrt(mean((preds_test_mean - test_df$zorf)^2))
+rmse_test
+# Check 90% CI coverage
+lower <- apply(pred_test2, 2, quantile, 0.05)
+upper <- apply(pred_test2, 2, quantile, 0.95)
+coverage <- mean(test_df$zorf >= lower & test_df$zorf <= upper)
+cat("90% CI coverage:", coverage, "\n")
+```
+
+
+
+
+# NEXT TEST:
+```{r}
+my_prior2 <- c(
+  prior(normal(0, 1), class = "b", coef = "time_index"),
+  prior(normal(0, 1), class = "b", coef = "sin_season"),
+  prior(normal(0, 1), class = "b", coef = "cos_season"),
+  prior(normal(0, 1), class = "b", coef = "HasUniversity"),
+  prior(normal(0, 1), class = "b", coef = "sept_intensity"),
+  prior(normal(7.5, 0.5), class = "Intercept"),
+
+  # mean-model random effect SD
+  prior(exponential(1), class = "sd", group = "ZipCode"),
+
+  # shape-model intercept
+  prior(normal(3, 1), class = "Intercept", dpar = "shape"),
+
+  # shape-model random effect SD
+  prior(exponential(1), class = "sd", group = "ZipCode", dpar = "shape")
+)
+```
+
+
+```{r}
+fit2 <- brm(
+  bf(
+    zorf ~ time_index + sin_season + cos_season +
+      HasUniversity + sept_intensity + (1 | ZipCode),
+    shape ~ 1 + (1 | ZipCode)
+  ),
+  data    = train_df,
+  family  = Gamma(link = "log"),
+  prior   = my_prior2,
+  chains  = 4,
+  iter    = 4000,
+  warmup  = 1000,
+  cores   = 4,
+  seed    = 42,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+```
+
+
+```{r}
+my_prior2 <- c(
+  prior(normal(0, 1), class = "b", coef = "time_index"),
+  prior(normal(0, 1), class = "b", coef = "sin_season"),
+  prior(normal(0, 1), class = "b", coef = "cos_season"),
+  prior(normal(0, 1), class = "b", coef = "HasUniversity"),
+  prior(normal(0, 1), class = "b", coef = "sept_intensity"),
+  prior(normal(7.5, 0.5), class = "Intercept"),
+
+  prior(exponential(1), class = "sd", group = "ZipCode"),
+
+  prior(normal(3, 1), class = "Intercept", dpar = "shape"),
+  prior(exponential(1), class = "sd", group = "ZipCode", dpar = "shape")
+)
+
+fit2 <- brm(
+  bf(
+    zorf ~ time_index + sin_season + cos_season +
+      HasUniversity + sept_intensity + (1 | ZipCode),
+    shape ~ 1 + (1 | ZipCode)
+  ),
+  data    = train_df,
+  family  = Gamma(link = "log"),
+  prior   = my_prior2,
+  chains  = 4,
+  iter    = 4000,
+  warmup  = 1000,
+  cores   = 4,
+  seed    = 42,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+```
+
+
+```{r}
+summary(fit2)
+plot(fit2)
+bayes_R2(fit2)
+
+pred_test2 <- posterior_predict(
+  fit2,
+  newdata            = test_df,
+  allow_new_levels   = TRUE,
+  sample_new_levels  = "gaussian"
+)
+
+preds_test_mean <- colMeans(pred_test2)
+cor(preds_test_mean, test_df$zorf)
+
+rmse_test <- sqrt(mean((preds_test_mean - test_df$zorf)^2))
+rmse_test
+
+lower <- apply(pred_test2, 2, quantile, 0.05)
+upper <- apply(pred_test2, 2, quantile, 0.95)
+coverage <- mean(test_df$zorf >= lower & test_df$zorf <= upper)
+
+cat("90% CI coverage:", coverage, "\n")
+```
+
+```{r}
+fitted_vals <- preds_test_mean
+residuals <- test_df$zorf - fitted_vals
+
+plot(fitted_vals, residuals,
+     pch = 16, col = rgb(0,0,0,0.3),
+     xlab = "Fitted", ylab = "Residuals")
+abline(h = 0, col = "red")
+```
+
+```{r}
+plot(fitted_vals, abs(residuals),
+     pch = 16, col = rgb(0,0,0,0.3),
+     xlab = "Fitted", ylab = "|Residual|")
+```
+
+```{r}
+plot(test_df$time_index, residuals,
+     pch = 16, col = rgb(0,0,0,0.3),
+     xlab = "Time", ylab = "Residuals")
+abline(h = 0, col = "red")
+```
+
+
+```{r}
+covered <- (test_df$zorf >= lower & test_df$zorf <= upper)
+
+coverage_by_zip <- aggregate(covered ~ ZipCode, data = test_df, mean)
+plot(coverage_by_zip$covered,
+     main = "Coverage by ZipCode", ylab = "Coverage")
+```
+
+
+```{r}
+colnames(long_df)
+```
+
+```{r}
+coverage_by_neighborhood <- aggregate(covered ~ Neighborhood, data = test_df, mean)
+```
+
+
+```{r}
+ggplot(long_df, aes(x = time_index, y = zorf, color = ZipCode)) +
+  geom_line(alpha = 0.3)
+```
+
+```{r}
+residuals <- test_df$zorf - preds_test_mean
+var_by_neighborhood <- aggregate(residuals ~ Neighborhood, data = test_df, function(x) var(x))
+```
+
+
+
+```{r}
+long_df %>%
+  group_by(ZipCode) %>%
+  summarise(slope = coef(lm(zorf ~ time_index))[2]) %>%
+  summary()
+```
+
+```{r}
+sample_neighborhoods <- long_df %>%
+  distinct(Neighborhood) %>%
+  slice(1:6) %>%
+  pull()
+
+ggplot(filter(long_df, Neighborhood %in% sample_neighborhoods),
+       aes(x = time_index, y = zorf, color = ZipCode)) +
+  geom_line(size = 1) +
+  facet_wrap(~ Neighborhood, scales = "free_y") +
+  theme_minimal()
+```
+
+
+```{r}
+sample_neighborhoods <- long_df %>%
+  distinct(Neighborhood) %>%
+  slice(7:16) %>%
+  pull()
+
+ggplot(filter(long_df, Neighborhood %in% sample_neighborhoods),
+       aes(x = time_index, y = zorf, color = ZipCode)) +
+  geom_line(size = 1) +
+  facet_wrap(~ Neighborhood, scales = "free_y") +
+  theme_minimal()
+```
+
+```{r}
+
+```
+
+
+
+
+```{r}
+ggplot(long_df, aes(x = time_index, y = zorf, color = factor(HasUniversity))) +
+  geom_line(alpha = 0.4) +
+    facet_wrap(~ Neighborhood, scales = "free_y") +
+  theme_minimal()
+```
+
+```{r}
+neighs <- unique(long_df$Neighborhood)
+# split into two halves
+first_half <- neighs[1:floor(length(neighs)/2)]
+second_half <- neighs[(floor(length(neighs)/2)+1):length(neighs)]
+
+# ---- Plot 1 ----
+ggplot(filter(long_df, Neighborhood %in% first_half),
+       aes(x = time_index, y = zorf, color = factor(HasUniversity))) +
+  geom_line(alpha = 0.4) +
+  facet_wrap(~ Neighborhood, scales = "free_y") +
+  theme_minimal()
+
+# ---- Plot 2 ----
+ggplot(filter(long_df, Neighborhood %in% second_half),
+       aes(x = time_index, y = zorf, color = factor(HasUniversity))) +
+  geom_line(alpha = 0.4) +
+  facet_wrap(~ Neighborhood, scales = "free_y") +
+  theme_minimal()
+```
+
+
+```{r}
+residuals <- long_df$zorf - fitted_vals
+
+ggplot(long_df, aes(x = Neighborhood, y = residuals)) +
+  geom_boxplot()
+```
+
+
+```{r}
+
+long_df %>%
+  group_by(Neighborhood, ZipCode) %>%
+  summarise(slope = coef(lm(zorf ~ time_index))[2]) %>%
+  ggplot(aes(x = Neighborhood, y = slope)) +
+  geom_boxplot()
+```
+
+
+```{r}
+library(lmtest)
+bptest(lm(zorf ~ time_index, data = long_df))
+```
+
+```{r}
+anova(lm(zorf ~ time_index + HasUniversity, data = long_df),
+      lm(zorf ~ time_index * HasUniversity, data = long_df))
+```
+
+```{r}
+anova(lm(zorf ~ time_index, data = long_df),
+      lm(zorf ~ time_index * Neighborhood, data = long_df))
+```
+
+```{r}
+anova(lm(zorf ~ time_index, data = long_df),
+      lm(zorf ~ time_index * ZipCode, data = long_df))
+```
+
+
+
+```{r}
+anova(
+  lm(zorf ~ sept_intensity + HasUniversity, data = long_df),
+  lm(zorf ~ sept_intensity * HasUniversity, data = long_df)
+)
+```
+
+
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+
+# ---------------------------
+# 1) Choose variables to test
+# ---------------------------
+vars_to_test <- c(
+  "time_index",
+  "sin_season",
+  "cos_season",
+  "season_flag",
+  "sept_intensity",
+  "rolling_volatility",
+  "HasUniversity",
+  "Neighborhood",
+  "ZipCode"
+)
+
+# Keep only variables that actually exist in long_df
+vars_to_test <- vars_to_test[vars_to_test %in% names(long_df)]
+
+# Optional: convert grouping vars to factors if they are not already
+long_df <- long_df %>%
+  mutate(
+    HasUniversity = as.factor(HasUniversity),
+    Neighborhood  = as.factor(Neighborhood),
+    ZipCode       = as.factor(ZipCode)
+  )
+
+# -----------------------------------
+# 2) Fit additive "global" base model
+# -----------------------------------
+base_formula <- as.formula(
+  paste("zorf ~", paste(vars_to_test, collapse = " + "))
+)
+
+base_model <- lm(base_formula, data = long_df)
+
+# ------------------------------------------------
+# 3) Generate all pairwise interactions to compare
+# ------------------------------------------------
+interaction_pairs <- combn(vars_to_test, 2, simplify = FALSE)
+
+# -------------------------------------------------------
+# 4) For each pair: fit additive + one interaction model
+# -------------------------------------------------------
+interaction_results <- map_dfr(interaction_pairs, function(pair) {
+  v1 <- pair[1]
+  v2 <- pair[2]
+
+  interaction_term <- paste0(v1, ":", v2)
+
+  interaction_formula <- as.formula(
+    paste(
+      "zorf ~",
+      paste(vars_to_test, collapse = " + "),
+      "+",
+      interaction_term
+    )
+  )
+
+  interaction_model <- lm(interaction_formula, data = long_df)
+
+  cmp <- anova(base_model, interaction_model)
+
+  tibble(
+    var1 = v1,
+    var2 = v2,
+    interaction = interaction_term,
+    df_added = cmp$Df[2],
+    rss_base = cmp$RSS[1],
+    rss_interaction = cmp$RSS[2],
+    rss_drop = cmp$RSS[1] - cmp$RSS[2],
+    f_value = cmp$F[2],
+    p_value = cmp$`Pr(>F)`[2]
+  )
+})
+
+# -----------------------------------------
+# 5) Adjust p-values for multiple testing
+# -----------------------------------------
+interaction_results <- interaction_results %>%
+  mutate(
+    p_bonferroni = p.adjust(p_value, method = "bonferroni"),
+    p_fdr = p.adjust(p_value, method = "fdr")
+  ) %>%
+  arrange(p_fdr, p_value)
+
+# ---------------------------
+# 6) View the ranked results
+# ---------------------------
+print(interaction_results, n = Inf)
+
+# Optional: only interactions that survive FDR
+significant_interactions <- interaction_results %>%
+  filter(!is.na(p_fdr), p_fdr < 0.05)
+
+print(significant_interactions, n = Inf)
+```
+
+
+
+```{r}
+colnames(long_df)
+```
+
+
+```{r}
+library(tidyverse)
+library(broom)
+
+results <- long_df %>%
+  group_by(Neighborhood) %>%
+  # Filter for neighborhoods with at least 2 unique ZipCodes
+  filter(n_distinct(ZipCode) > 1) %>%
+  nest() %>%
+  mutate(
+    # Fit the two models
+    mod_parallel = map(data, ~lm(zorf ~ time_index + ZipCode, data = .x)),
+    mod_interaction = map(data, ~lm(zorf ~ time_index * ZipCode, data = .x)),
+    
+    # Compare them using ANOVA
+    comparison = map2(mod_parallel, mod_interaction, ~anova(.x, .y)),
+    
+    # Extract the p-value
+    p_value = map_dbl(comparison, ~ .x$`Pr(>F)`[2])
+  ) %>%
+  select(Neighborhood, p_value) %>%
+  mutate(significant_difference = p_value < 0.05)
+```
+
+
+```{r}
+table(results$significant_difference)
+```
+
+
+```{r}
+# Extract the slopes for the neighborhoods with significant differences
+divergent_names <- results %>% filter(significant_difference == TRUE) %>% pull(Neighborhood)
+
+long_df %>%
+  filter(Neighborhood %in% divergent_names) %>%
+  group_by(Neighborhood, ZipCode) %>%
+  do(tidy(lm(zorf ~ time_index, data = .))) %>%
+  filter(term == "time_index") %>%
+  select(Neighborhood, ZipCode, estimate) # 'estimate' is the growth rate
+```
 

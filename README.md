@@ -1,23 +1,29 @@
 # ML + DM 2 Final Project: Krithika Natarajan and Maya Prasad
+## Overview
+Two models to help Boston renters identify favorable rental timing and predict zip-level rental prices. Boston's rental market is highly seasonal and fragmented across neighborhoods, making national tools like Zillow insufficient for local decision-making.
+
+- **Bayesian Hierarchical Model**: Predicts zip-level ZORI rental prices across Boston neighborhoods, 
+  capturing local rent dynamics via nested random effects and academic calendar seasonality.
+- **CNN Classifier**: Classifies whether current market conditions represent a favorable time to rent 
+  for a given zip code, using a 12-month sequential window of temporal and spatial features.
 
 ## Problem Statement
-Renters in the Greater Boston area face significant challenges in understanding when and where to rent. The Boston rental market is highly fragmented as pricing dynamics in university-adjacent neighborhoods like Allston differ drastically from downtown or suburban areas, and these local trends are not captured by national tools like Zillow's market metrics.
+Renters in Greater Boston face significant challenges in understanding when and where to rent. 
+The market is highly fragmented as pricing dynamics in university-adjacent neighborhoods like 
+Allston differ drastically from downtown or suburban areas. These local trends are not 
+captured by national tools like Zillow.
 
-To address this, we aim to use machine learning to deliver two linked outputs to Boston renters: a prediction of expected rental price given a property's characteristics and location, and a timing signal indicating whether current market conditions represent a favorable moment to rent. These two goals are deliberately connected while understanding how much rental units will cost is important, it is also useful to know when to act on that information is what renters in Boston's highly seasonal market actually need. 
+Boston's rental market is shaped by dense, local signals: university schedules driving 
+seasonal move-in and move-out cycles, neighborhood demographics, and historical demand. 
+A single national model systematically misrepresents these conditions, motivating a 
+Boston-specific approach.
 
-ML is particularly suited for this problem because Boston's rental market is shaped by dense signals like university schedules which influence move in/out, weather patterns which influence utility rates, neighborhood demographics, and historical demand indices. Second, the submarket fragmentation between university-adjacent zip codes and downtown cores means that a single national model will systematically misrepresent local conditions, motivating a Boston-specific modeling approach. Third, the temporal dimension of the timing signal requires a model architecture that can incorporate sequential and seasonal inputs alongside static property features.
-
- This project aims to build a set of models that help renters make more informed decisions by predicting future rental prices and classifying whether a given zip code represents a good renting opportunity at a given point in time.
-
+This project delivers two linked outputs to Boston renters: a prediction of expected 
+rental price given a property's location and characteristics, and a classification of 
+whether current market conditions represent a favorable time to rent in a given zip code.
 
 ## Data
-- Zillow Observed Rent Index (ZORI): Monthly rental price index at the zip code level across Greater Boston
-- Zillow Observed Rent Forecast (ZORF): A month-ahead, quarter-ahead and year-ahead forecast of the Zillow Observed Rent Index (ZORI).
-- Census Demographics: Population, income, and housing characteristics by zip code via data.census.gov
-- Zillow Observed Renter Demand Index (ZORDI): Demand-side rental pressure index from Zillow
-- Spatial Features: Binary flag close_to_university derived from proximity to colleges and universities
-- Temporal Features: Boolean variable is_before_september / is_after_september to capture Boston's student-driven seasonal rental cycle
-- Weather Patterns: Seasonal weather data as a supplementary temporal signal
+- **Zillow Observed Rent Index (ZORI)**: Monthly rental price index at the zip code level across Greater Boston, sourced from Zillow.
   
 ## Models
 ### 1. Bayesian Model
@@ -56,3 +62,10 @@ ML is particularly suited for this problem because Boston's rental market is sha
   - `build_features`:
   - `predict_zip`:
   - `main`:
+- `bayesian_model.Rmd`: Bayesian hierarchical model using `brms` in R to predict zip-level rental prices across Boston neighborhoods.
+  - **Data Preparation**: pivots ZORI data to long format and encodes date features
+  - **Feature Engineering**: computes volatility, September intensity, and sin/cos seasonality
+  - **EDA**: zip-level and neighborhood-level rent trend visualizations
+  - **Model Definition**: Gamma-log formula with prior specification
+  - **Model Fitting**: 80/20 train/test split, 4 chains, 2500 iterations via HMC
+  - **Evaluation**: RMSE, Bayes $R^2$, posterior predictive checks
